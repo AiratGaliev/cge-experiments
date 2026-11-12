@@ -1,0 +1,19 @@
+[package]
+name = "native-brick-breaker"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+description = "Standalone Brick Breaker proof of stack for SDL3, wgpu, Flecs, Box2D v3, miniaudio and QuickJS-NG"
+
+[dependencies]
+anyhow = "=1.0.100"
+boxdd = "=0.6.0"
+bytemuck = { version = "=1.25.0", features = ["derive"] }
+crossbeam-queue = "=0.3.12"
+flecs_ecs = "=0.2.2"
+miniaudio = { version = "=0.10.0", default-features = false, features = ["ma-log-level-error"] }
+pollster = "=0.4.0"
+rquickjs = { version = "=0.14.0", features = ["std"] }
+sdl3 = { version = "=0.22.1", features = ["build-from-source", "raw-window-handle"] }
+wgpu = "=30.0.1"

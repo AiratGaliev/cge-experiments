@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "none",
+    "strict": true,
+    "noEmitOnError": true,
+    "skipLibCheck": true,
+    "removeComments": false,
+    "outFile": "assets/game.js"
+  },
+  "files": [
+    "scripts/game.ts"
+  ]
+}
