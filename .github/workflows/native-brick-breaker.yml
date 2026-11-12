@@ -36,10 +36,10 @@ jobs:
       run:
         working-directory: rust-brick-breaker
     steps:
-      - name: Checkout latest task branch
+      - name: Checkout event commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref || github.ref_name }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Set up Node.js
