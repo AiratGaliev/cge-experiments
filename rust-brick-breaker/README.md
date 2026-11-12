@@ -8,7 +8,7 @@ Standalone Rust proof of stack for a classic Brick Breaker game. The prototype i
 
 - Windows 10/11 x64.
 - Visual Studio 2022 Build Tools with the Desktop development with C++ workload and Windows SDK.
-- CMake and Git available on PATH (CMake is also used by SDL3's source build).
+- LLVM/Clang (libclang is required by the Flecs Rust binding's bindgen build step), CMake and Git available on PATH.
 - Rust stable toolchain 1.97.0 or newer, with the MSVC target.
 - Node.js 22.x and npm.
 - A working GPU driver with a D3D12 or Vulkan-capable adapter.
@@ -22,7 +22,7 @@ Standalone Rust proof of stack for a classic Brick Breaker game. The prototype i
 - Node.js 22.x and npm.
 - A working Vulkan or OpenGL-capable GPU driver and a desktop session for interactive execution.
 
-SDL3 is built from source through the crate's `build-from-source` feature. The game uses SDL3 only for its window, input and OS event lifecycle; rendering is performed by wgpu. miniaudio's default bindgen feature is disabled: the crate's pregenerated Linux x86_64 and Windows x86_64 bindings are used.
+SDL3 is built from source through the crate's `build-from-source` feature. The game uses SDL3 only for its window, input and OS event lifecycle; rendering is performed by wgpu. maudio uses pregenerated bindings for the Windows x64 and Linux x64 targets, so it does not require a second bindgen version.
 
 ## Build and run
 
@@ -109,7 +109,8 @@ Flecs render components ---> CPU rectangle vertices ---> wgpu render pipeline
 | flecs_ecs | 0.2.2 | ECS entities, components and systems | MIT |
 | boxdd | 0.6.0 | Safe Rust API over the official Box2D v3 C API | MIT OR Apache-2.0 |
 | Box2D | 3.2.0 | Native rigid-body simulation vendored by boxdd-sys | MIT |
-| miniaudio | 0.10.0 | Desktop audio output | MIT |
+| maudio | 0.1.15 | Safe Rust API and playback device over miniaudio | MIT |
+| miniaudio | 0.11.23 | Native audio engine embedded by maudio-sys | Unlicense OR MIT No Attribution |
 | rquickjs | 0.14.0 | High-level Rust bindings to QuickJS-NG | MIT |
 | QuickJS-NG | commit `0fdea21ff1090084e91dad812b343d92e79ba9d9` | Embedded ES2020 JavaScript runtime | MIT |
 | TypeScript | 5.9.3 | Source language for game rules | Apache-2.0 |
@@ -129,7 +130,8 @@ Primary sources:
 - [Flecs Rust binding](https://docs.rs/flecs_ecs/0.2.2/flecs_ecs/)
 - [boxdd 0.6.0](https://docs.rs/boxdd/0.6.0/boxdd/)
 - [Box2D 3.2.0 source revision](https://github.com/erincatto/box2d/commit/56edae79f2949d86142b03450d5d60f63bcf5a6f)
-- [miniaudio 0.10.0](https://docs.rs/miniaudio/0.10.0/miniaudio/)
+- [maudio 0.1.15](https://docs.rs/maudio/0.1.15/maudio/)
+- [miniaudio upstream](https://github.com/mackron/miniaudio)
 - [rquickjs 0.14.0](https://docs.rs/rquickjs/0.14.0/rquickjs/)
 - [QuickJS-NG pinned revision](https://github.com/quickjs-ng/quickjs/commit/0fdea21ff1090084e91dad812b343d92e79ba9d9)
 - [TypeScript 5.9.3](https://www.npmjs.com/package/typescript/v/5.9.3)

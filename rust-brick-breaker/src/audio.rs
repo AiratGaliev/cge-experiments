@@ -1,32 +1,37 @@
 use std::sync::Arc;
 
 use crossbeam_queue::ArrayQueue;
-use miniaudio::{Device, DeviceConfig, DeviceType, Format};
+use maudio::{
+    audio::sample_rate::SampleRate,
+    device::{
+        device_builder::{DeviceBuilder, DeviceBuilderOps},
+        Device, DeviceOps,
+    },
+};
 
-const SAMPLE_RATE: u32 = 48_000;
 const CHANNELS: u32 = 2;
 const QUEUE_CAPACITY: usize = 16_384;
 
 pub struct Audio {
     samples: Arc<ArrayQueue<f32>>,
-    _device: Option<Device>,
+    _device: Option<Device<f32>>,
 }
 
 impl Audio {
     pub fn new() -> Self {
         let samples = Arc::new(ArrayQueue::new(QUEUE_CAPACITY));
-        let mut config = DeviceConfig::new(DeviceType::Playback);
-        config.playback_mut().set_format(Format::F32);
-        config.playback_mut().set_channels(CHANNELS);
-        config.set_sample_rate(SAMPLE_RATE);
-
         let callback_samples = Arc::clone(&samples);
-        config.set_data_callback(move |_device, output, _input| {
-            mix_mono_to_stereo(output.as_samples_mut::<f32>(), || callback_samples.pop());
-        });
 
-        let device = match Device::new(None, &config) {
-            Ok(device) => match device.start() {
+        let device = DeviceBuilder::playback()
+            .f32()
+            .playback_channels(CHANNELS)
+            .sample_rate(SampleRate::Sr48000)
+            .with_callback(move |_device, output| {
+                mix_mono_to_stereo(output, || callback_samples.pop());
+            });
+
+        let device = match device {
+            Ok(mut device) => match device.device_start() {
                 Ok(()) => Some(device),
                 Err(error) => {
                     eprintln!("Audio playback disabled: could not start miniaudio device: {error}");
@@ -72,10 +77,11 @@ pub fn enqueue_sound(queue: &ArrayQueue<f32>, name: &str) {
 }
 
 fn synthesize_tone(frequency: f32, duration_seconds: f32, volume: f32) -> Vec<f32> {
-    let frame_count = (SAMPLE_RATE as f32 * duration_seconds).round() as usize;
+    const SAMPLE_RATE: f32 = 48_000.0;
+    let frame_count = (SAMPLE_RATE * duration_seconds).round() as usize;
     (0..frame_count)
         .map(|frame| {
-            let phase = std::f32::consts::TAU * frequency * frame as f32 / SAMPLE_RATE as f32;
+            let phase = std::f32::consts::TAU * frequency * frame as f32 / SAMPLE_RATE;
             let envelope = 1.0 - frame as f32 / frame_count.max(1) as f32;
             (phase.sin() * envelope * volume).clamp(-1.0, 1.0)
         })
