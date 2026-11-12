@@ -130,10 +130,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Run unit and integration tests
-        run: cargo test --all-targets
+        run: cargo test --all-targets --locked
+
+      - name: Link native application executable
+        run: cargo build --locked
 
       - name: Check native application target
-        run: cargo check --all-targets
+        run: cargo check --all-targets --locked

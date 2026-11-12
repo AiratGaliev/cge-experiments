@@ -42,9 +42,11 @@ Run all commands from this directory.
 
    `cargo fmt --check`
 
-   `cargo clippy --all-targets -- -D warnings`
+   `cargo clippy --all-targets --locked -- -D warnings`
 
-   `cargo test`
+   `cargo test --locked`
+
+   `cargo build --locked`
 
    `cargo run`
 
