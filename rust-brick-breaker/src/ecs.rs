@@ -88,8 +88,9 @@ impl EcsScene {
 
         let input_frame = Arc::clone(&input);
         world
-            .system_named::<(&mut Transform, &PlayerControlled)>("ApplyPaddleInput")
-            .each(move |(transform, _control)| {
+            .system_named::<&mut Transform>("ApplyPaddleInput")
+            .with(PlayerControlled)
+            .each(move |transform| {
                 let frame = input_frame
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -119,7 +120,7 @@ impl EcsScene {
                 color: [0.30, 0.82, 1.0, 1.0],
                 visible: true,
             })
-            .set(PlayerControlled);
+            .add(PlayerControlled);
 
         world
             .entity()
@@ -229,8 +230,10 @@ impl EcsScene {
 
     pub fn reset_paddle(&self) {
         self.world
-            .new_query::<(&mut Transform, &PlayerControlled)>()
-            .each(|(transform, _control)| {
+            .query::<&mut Transform>()
+            .with(PlayerControlled)
+            .build()
+            .each(|transform| {
                 transform.x = 0.0;
                 transform.y = 0.65;
             });
@@ -239,8 +242,10 @@ impl EcsScene {
     pub fn paddle_x(&self) -> f32 {
         let mut x = 0.0;
         self.world
-            .new_query::<(&Transform, &PlayerControlled)>()
-            .each(|(transform, _control)| x = transform.x);
+            .query::<&Transform>()
+            .with(PlayerControlled)
+            .build()
+            .each(|transform| x = transform.x);
         x
     }
 
