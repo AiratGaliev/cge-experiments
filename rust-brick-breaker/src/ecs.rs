@@ -1,15 +1,13 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{Arc, Mutex},
 };
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use flecs_ecs::prelude::*;
 
-use crate::physics::{BRICK_COUNT, PhysicsPositions};
-
-const PADDLE_SPEED: f32 = 7.0;
-const PADDLE_LIMIT: f32 = 3.75;
+#[derive(Component, Clone, Copy)]
+struct RuntimeEntityId(u32);
 
 #[derive(Component, Clone, Copy)]
 struct Transform {
@@ -20,32 +18,30 @@ struct Transform {
 }
 
 #[derive(Component, Clone, Copy)]
-struct Renderable {
+struct Rectangle {
     color: [f32; 4],
-    visible: bool,
+}
+
+#[derive(Component, Clone, Copy)]
+struct Circle {
+    radius: f32,
+    color: [f32; 4],
 }
 
 #[derive(Component, Clone, Copy)]
 struct PhysicsLink {
-    slot: u32,
+    entity_id: u32,
 }
 
-#[derive(Component, Clone, Copy)]
-struct PlayerControlled;
-
-#[derive(Component, Clone, Copy)]
-struct Brick {
-    index: usize,
+#[derive(Component, Clone)]
+struct TextLabel {
+    value: String,
+    scale: f32,
+    color: [f32; 4],
 }
 
-#[derive(Clone, Copy, Default)]
-struct InputFrame {
-    horizontal: f32,
-    delta_seconds: f32,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct DrawItem {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrawRectangle {
     pub x: f32,
     pub y: f32,
     pub width: f32,
@@ -53,219 +49,347 @@ pub struct DrawItem {
     pub color: [f32; 4],
 }
 
-pub struct EcsScene {
-    world: World,
-    input: Arc<Mutex<InputFrame>>,
-    positions: Arc<Mutex<HashMap<u32, [f32; 2]>>>,
-    removed_bricks: Arc<Mutex<HashSet<usize>>>,
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrawCircle {
+    pub x: f32,
+    pub y: f32,
+    pub radius: f32,
+    pub color: [f32; 4],
 }
 
-impl EcsScene {
-    pub fn new(initial_positions: &PhysicsPositions) -> Result<Self> {
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrawText {
+    pub x: f32,
+    pub y: f32,
+    pub scale: f32,
+    pub color: [f32; 4],
+    pub value: String,
+}
+
+type PositionMap = HashMap<u32, [f32; 2]>;
+
+pub struct EcsWorld {
+    world: World,
+    native_entities: HashMap<u32, u64>,
+    physics_positions: Arc<Mutex<PositionMap>>,
+    pending_transforms: Arc<Mutex<PositionMap>>,
+    pending_text: Arc<Mutex<HashMap<u32, String>>>,
+}
+
+impl EcsWorld {
+    pub fn new() -> Self {
         let world = World::new();
+        world.component::<RuntimeEntityId>();
         world.component::<Transform>();
-        world.component::<Renderable>();
+        world.component::<Rectangle>();
+        world.component::<Circle>();
         world.component::<PhysicsLink>();
-        world.component::<PlayerControlled>();
-        world.component::<Brick>();
+        world.component::<TextLabel>();
 
-        let input = Arc::new(Mutex::new(InputFrame::default()));
-        let positions = Arc::new(Mutex::new(initial_positions.clone()));
-        let removed_bricks = Arc::new(Mutex::new(HashSet::new()));
+        let physics_positions = Arc::new(Mutex::new(PositionMap::new()));
+        let pending_transforms = Arc::new(Mutex::new(PositionMap::new()));
+        let pending_text = Arc::new(Mutex::new(HashMap::<u32, String>::new()));
 
-        let sync_positions = Arc::clone(&positions);
+        let positions = Arc::clone(&physics_positions);
         world
-            .system_named::<(&mut Transform, &PhysicsLink)>("SyncPhysicsTransforms")
+            .system_named::<(&mut Transform, &PhysicsLink)>("SynchronizePhysicsTransforms")
             .each(move |(transform, link)| {
-                let snapshot = sync_positions
+                let snapshot = positions
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(position) = snapshot.get(&link.slot) {
+                if let Some(position) = snapshot.get(&link.entity_id) {
                     transform.x = position[0];
                     transform.y = position[1];
                 }
             });
 
-        let input_frame = Arc::clone(&input);
+        let transforms = Arc::clone(&pending_transforms);
         world
-            .system_named::<&mut Transform>("ApplyPaddleInput")
-            .with(PlayerControlled)
-            .each(move |transform| {
-                let frame = input_frame
+            .system_named::<(&mut Transform, &RuntimeEntityId)>("ApplyScriptTransforms")
+            .each(move |(transform, entity)| {
+                let pending = transforms
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                transform.x = (transform.x + frame.horizontal * PADDLE_SPEED * frame.delta_seconds)
-                    .clamp(-PADDLE_LIMIT, PADDLE_LIMIT);
+                if let Some(position) = pending.get(&entity.0) {
+                    transform.x = position[0];
+                    transform.y = position[1];
+                }
             });
 
-        let hidden = Arc::clone(&removed_bricks);
+        let text_updates = Arc::clone(&pending_text);
         world
-            .system_named::<(&mut Renderable, &Brick)>("HideDestroyedBricks")
-            .each(move |(renderable, brick)| {
-                let removed = hidden
+            .system_named::<(&mut TextLabel, &RuntimeEntityId)>("ApplyScriptText")
+            .each(move |(label, entity)| {
+                let pending = text_updates
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                renderable.visible = !removed.contains(&brick.index);
+                if let Some(value) = pending.get(&entity.0) {
+                    label.value.clone_from(value);
+                }
             });
 
-        world
-            .entity()
-            .set(Transform {
-                x: 0.0,
-                y: 0.65,
-                width: 1.40,
-                height: 0.24,
-            })
-            .set(Renderable {
-                color: [0.30, 0.82, 1.0, 1.0],
-                visible: true,
-            })
-            .add(PlayerControlled);
-
-        world
-            .entity()
-            .set(Transform {
-                x: 0.0,
-                y: 0.95,
-                width: 0.24,
-                height: 0.24,
-            })
-            .set(Renderable {
-                color: [1.0, 0.94, 0.72, 1.0],
-                visible: true,
-            })
-            .set(PhysicsLink { slot: 1 });
-
-        for index in 0..BRICK_COUNT {
-            let column = index % 9;
-            let row = index / 9;
-            let x = (column as f32 - 4.0) * 1.04;
-            let y = 4.35 + row as f32 * 0.48;
-            let color = match row {
-                0 => [1.0, 0.40, 0.43, 1.0],
-                1 => [1.0, 0.66, 0.31, 1.0],
-                2 => [0.78, 0.60, 1.0, 1.0],
-                _ => [0.42, 0.86, 0.62, 1.0],
-            };
-
-            world
-                .entity()
-                .set(Transform {
-                    x,
-                    y,
-                    width: 0.92,
-                    height: 0.34,
-                })
-                .set(Renderable {
-                    color,
-                    visible: true,
-                })
-                .set(PhysicsLink {
-                    slot: (index + 2) as u32,
-                })
-                .set(Brick { index });
-        }
-
-        Ok(Self {
+        Self {
             world,
-            input,
-            positions,
-            removed_bricks,
-        })
+            native_entities: HashMap::new(),
+            physics_positions,
+            pending_transforms,
+            pending_text,
+        }
     }
 
-    pub fn progress(&self, horizontal: f32, delta_seconds: f32) {
-        {
-            let mut frame = self
-                .input
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            frame.horizontal = horizontal.clamp(-1.0, 1.0);
-            frame.delta_seconds = delta_seconds.max(0.0);
+    pub fn create_rectangle(
+        &mut self,
+        entity_id: u32,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        color: [f32; 4],
+    ) -> Result<()> {
+        if self.native_entities.contains_key(&entity_id) {
+            bail!("runtime entity {entity_id} already exists");
         }
-        let _ = self.world.progress();
+        validate_rect(x, y, width, height, color)?;
+
+        let entity = self.world.entity();
+        let native_id = u64::from(entity.id());
+        entity
+            .set(RuntimeEntityId(entity_id))
+            .set(Transform {
+                x,
+                y,
+                width,
+                height,
+            })
+            .set(Rectangle { color });
+        self.native_entities.insert(entity_id, native_id);
+        Ok(())
     }
 
-    pub fn set_physics_positions(&self, snapshot: &PhysicsPositions) {
-        {
-            let mut positions = self
-                .positions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            positions.clear();
-            positions.extend(snapshot.iter().map(|(slot, position)| (*slot, *position)));
+    pub fn create_circle(
+        &mut self,
+        entity_id: u32,
+        x: f32,
+        y: f32,
+        radius: f32,
+        color: [f32; 4],
+    ) -> Result<()> {
+        if self.native_entities.contains_key(&entity_id) {
+            bail!("runtime entity {entity_id} already exists");
         }
+        if !x.is_finite()
+            || !y.is_finite()
+            || !radius.is_finite()
+            || radius <= 0.0
+            || color.iter().any(|channel| !channel.is_finite())
         {
-            let mut frame = self
-                .input
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            frame.delta_seconds = 0.0;
+            bail!("invalid circle entity data");
         }
-        let _ = self.world.progress();
+
+        let entity = self.world.entity();
+        let native_id = u64::from(entity.id());
+        entity
+            .set(RuntimeEntityId(entity_id))
+            .set(Transform {
+                x,
+                y,
+                width: radius * 2.0,
+                height: radius * 2.0,
+            })
+            .set(Circle { radius, color });
+        self.native_entities.insert(entity_id, native_id);
+        Ok(())
     }
 
-    pub fn mark_bricks_destroyed(&self, indices: &[usize]) {
-        let mut removed = self
-            .removed_bricks
+    pub fn create_text(
+        &mut self,
+        entity_id: u32,
+        value: String,
+        x: f32,
+        y: f32,
+        scale: f32,
+        color: [f32; 4],
+    ) -> Result<()> {
+        if self.native_entities.contains_key(&entity_id) {
+            bail!("runtime entity {entity_id} already exists");
+        }
+        if !x.is_finite()
+            || !y.is_finite()
+            || !scale.is_finite()
+            || scale <= 0.0
+            || value.len() > 256
+            || color.iter().any(|channel| !channel.is_finite())
+        {
+            bail!("invalid text entity data");
+        }
+
+        let entity = self.world.entity();
+        let native_id = u64::from(entity.id());
+        entity
+            .set(RuntimeEntityId(entity_id))
+            .set(Transform {
+                x,
+                y,
+                width: 0.0,
+                height: 0.0,
+            })
+            .set(TextLabel {
+                value,
+                scale,
+                color,
+            });
+        self.native_entities.insert(entity_id, native_id);
+        Ok(())
+    }
+
+    pub fn attach_physics(&mut self, entity_id: u32) -> Result<()> {
+        let native_id = *self
+            .native_entities
+            .get(&entity_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown runtime entity {entity_id}"))?;
+        self.world
+            .entity_from_id(native_id)
+            .set(PhysicsLink { entity_id });
+        Ok(())
+    }
+
+    pub fn set_position(&mut self, entity_id: u32, x: f32, y: f32) -> Result<()> {
+        if !self.native_entities.contains_key(&entity_id) {
+            bail!("unknown runtime entity {entity_id}");
+        }
+        if !x.is_finite() || !y.is_finite() {
+            bail!("entity position must be finite");
+        }
+        self.pending_transforms
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        removed.extend(indices.iter().copied());
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(entity_id, [x, y]);
+        Ok(())
     }
 
-    pub fn reset_bricks(&self) {
-        self.removed_bricks
+    pub fn set_text(&mut self, entity_id: u32, value: String) -> Result<()> {
+        if !self.native_entities.contains_key(&entity_id) {
+            bail!("unknown runtime entity {entity_id}");
+        }
+        if value.len() > 256 {
+            bail!("text label exceeds 256 bytes");
+        }
+        self.pending_text
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(entity_id, value);
+        Ok(())
+    }
+
+    pub fn destroy_entity(&mut self, entity_id: u32) -> Result<()> {
+        let native_id = self
+            .native_entities
+            .remove(&entity_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown runtime entity {entity_id}"))?;
+        self.world.entity_from_id(native_id).destruct();
+        self.pending_transforms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&entity_id);
+        self.pending_text
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&entity_id);
+        self.physics_positions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&entity_id);
+        Ok(())
+    }
+
+    pub fn apply_pending_changes(&mut self) {
+        let _ = self.world.progress();
+        self.pending_transforms
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        self.pending_text
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    pub fn synchronize_physics(&mut self, positions: &PositionMap) {
         {
-            let mut frame = self
-                .input
+            let mut snapshot = self
+                .physics_positions
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            frame.delta_seconds = 0.0;
+            snapshot.clear();
+            snapshot.extend(positions.iter().map(|(id, position)| (*id, *position)));
         }
         let _ = self.world.progress();
     }
 
-    pub fn reset_paddle(&self) {
+    pub fn draw_rectangles(&self) -> Vec<DrawRectangle> {
+        let mut items = Vec::with_capacity(self.native_entities.len());
         self.world
-            .query::<&mut Transform>()
-            .with(PlayerControlled)
-            .build()
-            .each(|transform| {
-                transform.x = 0.0;
-                transform.y = 0.65;
-            });
-    }
-
-    pub fn paddle_x(&self) -> f32 {
-        let mut x = 0.0;
-        self.world
-            .query::<&Transform>()
-            .with(PlayerControlled)
-            .build()
-            .each(|transform| x = transform.x);
-        x
-    }
-
-    pub fn draw_items(&self) -> Vec<DrawItem> {
-        let mut items = Vec::with_capacity(BRICK_COUNT + 2);
-        self.world
-            .new_query::<(&Transform, &Renderable)>()
-            .each(|(transform, renderable)| {
-                if renderable.visible {
-                    items.push(DrawItem {
-                        x: transform.x,
-                        y: transform.y,
-                        width: transform.width,
-                        height: transform.height,
-                        color: renderable.color,
-                    });
-                }
+            .new_query::<(&Transform, &Rectangle)>()
+            .each(|(transform, rectangle)| {
+                items.push(DrawRectangle {
+                    x: transform.x,
+                    y: transform.y,
+                    width: transform.width,
+                    height: transform.height,
+                    color: rectangle.color,
+                });
             });
         items
     }
+
+    pub fn draw_circles(&self) -> Vec<DrawCircle> {
+        let mut items = Vec::new();
+        self.world
+            .new_query::<(&Transform, &Circle)>()
+            .each(|(transform, circle)| {
+                items.push(DrawCircle {
+                    x: transform.x,
+                    y: transform.y,
+                    radius: circle.radius,
+                    color: circle.color,
+                });
+            });
+        items
+    }
+
+    pub fn draw_text(&self) -> Vec<DrawText> {
+        let mut items = Vec::new();
+        self.world
+            .new_query::<(&Transform, &TextLabel)>()
+            .each(|(transform, label)| {
+                items.push(DrawText {
+                    x: transform.x,
+                    y: transform.y,
+                    scale: label.scale,
+                    color: label.color,
+                    value: label.value.clone(),
+                });
+            });
+        items
+    }
+
+    pub fn entity_count(&self) -> usize {
+        self.native_entities.len()
+    }
+}
+
+fn validate_rect(x: f32, y: f32, width: f32, height: f32, color: [f32; 4]) -> Result<()> {
+    if !x.is_finite()
+        || !y.is_finite()
+        || !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+        || color.iter().any(|channel| !channel.is_finite())
+    {
+        bail!("invalid rectangle entity data");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -273,24 +397,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn flecs_system_moves_the_paddle_and_collects_renderables() {
-        let positions = HashMap::from([(1, [0.0, 0.95])]);
-        let scene = EcsScene::new(&positions).expect("create ECS world");
+    fn flecs_owns_runtime_entities_and_produces_render_data() {
+        let mut world = EcsWorld::new();
+        world
+            .create_rectangle(1, 0.0, -2.0, 1.0, 0.2, [0.2, 0.8, 1.0, 1.0])
+            .unwrap();
+        world
+            .create_text(2, "LABEL 0".into(), -0.9, 0.9, 0.02, [1.0; 4])
+            .unwrap();
 
-        scene.progress(1.0, 1.0);
-
-        assert!(scene.paddle_x() > 3.5);
-        assert_eq!(scene.draw_items().len(), BRICK_COUNT + 2);
+        assert_eq!(world.entity_count(), 2);
+        assert_eq!(world.draw_rectangles().len(), 1);
+        assert_eq!(world.draw_text()[0].value, "LABEL 0");
     }
 
     #[test]
-    fn destroyed_bricks_are_hidden_by_a_flecs_system() {
-        let positions = HashMap::from([(1, [0.0, 0.95])]);
-        let scene = EcsScene::new(&positions).expect("create ECS world");
+    fn flecs_systems_apply_script_changes_and_physics_snapshots() {
+        let mut world = EcsWorld::new();
+        world
+            .create_rectangle(7, 0.0, 0.0, 1.0, 1.0, [1.0; 4])
+            .unwrap();
+        world.attach_physics(7).unwrap();
 
-        scene.mark_bricks_destroyed(&[0, 2, 4]);
-        scene.set_physics_positions(&positions);
+        world.synchronize_physics(&HashMap::from([(7, [2.0, 3.0])]));
+        assert_eq!(world.draw_rectangles()[0].x, 2.0);
+        assert_eq!(world.draw_rectangles()[0].y, 3.0);
 
-        assert_eq!(scene.draw_items().len(), BRICK_COUNT - 1);
+        world.set_position(7, -1.0, -2.0).unwrap();
+        world.apply_pending_changes();
+        assert_eq!(world.draw_rectangles()[0].x, -1.0);
+        assert_eq!(world.draw_rectangles()[0].y, -2.0);
+    }
+
+    #[test]
+    fn destroying_an_entity_releases_its_flecs_record() {
+        let mut world = EcsWorld::new();
+        world
+            .create_rectangle(10, 0.0, 0.0, 1.0, 1.0, [1.0; 4])
+            .unwrap();
+        world.destroy_entity(10).unwrap();
+
+        assert_eq!(world.entity_count(), 0);
+        assert!(world.draw_rectangles().is_empty());
+    }
+
+    #[test]
+    fn invalid_render_data_is_rejected() {
+        let mut world = EcsWorld::new();
+        assert!(
+            world
+                .create_rectangle(1, 0.0, 0.0, 0.0, 1.0, [1.0; 4])
+                .is_err()
+        );
     }
 }
