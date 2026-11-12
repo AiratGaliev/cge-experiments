@@ -64,9 +64,7 @@ impl ScriptEngine {
     }
 
     pub fn brick_destroyed(&self, points: u32, remaining: usize) -> Result<GameSnapshot> {
-        self.evaluate(&format!(
-            "game.onBrickDestroyed({points}, {remaining})"
-        ))
+        self.evaluate(&format!("game.onBrickDestroyed({points}, {remaining})"))
     }
 
     pub fn ball_lost(&self) -> Result<GameSnapshot> {
@@ -82,12 +80,11 @@ impl ScriptEngine {
     }
 
     fn evaluate(&self, expression: &str) -> Result<GameSnapshot> {
-        self.context
-            .with(|ctx| -> anyhow::Result<GameSnapshot> {
-                ctx.eval::<(), _>(expression)
-                    .context("execute TypeScript game rule in QuickJS-NG")?;
-                read_snapshot(ctx).context("read QuickJS game state")
-            })
+        self.context.with(|ctx| -> anyhow::Result<GameSnapshot> {
+            ctx.eval::<(), _>(expression)
+                .context("execute TypeScript game rule in QuickJS-NG")?;
+            read_snapshot(ctx).context("read QuickJS game state")
+        })
     }
 
     fn read_snapshot(&self) -> Result<GameSnapshot> {

@@ -46,7 +46,11 @@ fn main() -> Result<()> {
     let sdl = sdl3::init().context("initialize SDL3")?;
     let video = sdl.video().context("initialize SDL3 video subsystem")?;
     let window = video
-        .window("CGE Experiments — Native Brick Breaker", WINDOW_WIDTH, WINDOW_HEIGHT)
+        .window(
+            "CGE Experiments — Native Brick Breaker",
+            WINDOW_WIDTH,
+            WINDOW_HEIGHT,
+        )
         .position_centered()
         .resizable()
         .build()
@@ -57,8 +61,8 @@ fn main() -> Result<()> {
 }
 
 fn run_game(sdl: sdl3::Sdl, window: Window) -> Result<()> {
-    let mut renderer = pollster::block_on(Renderer::new(&window))
-        .context("initialize wgpu renderer")?;
+    let mut renderer =
+        pollster::block_on(Renderer::new(&window)).context("initialize wgpu renderer")?;
     let mut event_pump = sdl.event_pump().context("create SDL3 event pump")?;
 
     let audio = Audio::new();
@@ -171,8 +175,7 @@ fn run_game(sdl: sdl3::Sdl, window: Window) -> Result<()> {
 
                 if !step.bricks_destroyed.is_empty() {
                     scene.mark_bricks_destroyed(&step.bricks_destroyed);
-                    let bricks_before_step =
-                        step.remaining_bricks + step.bricks_destroyed.len();
+                    let bricks_before_step = step.remaining_bricks + step.bricks_destroyed.len();
                     for destroyed_count in 0..step.bricks_destroyed.len() {
                         let remaining = bricks_before_step.saturating_sub(destroyed_count + 1);
                         snapshot = scripting.brick_destroyed(100, remaining)?;

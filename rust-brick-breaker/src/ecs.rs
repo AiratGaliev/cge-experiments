@@ -93,8 +93,7 @@ impl EcsScene {
                 let frame = input_frame
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                transform.x = (transform.x
-                    + frame.horizontal * PADDLE_SPEED * frame.delta_seconds)
+                transform.x = (transform.x + frame.horizontal * PADDLE_SPEED * frame.delta_seconds)
                     .clamp(-PADDLE_LIMIT, PADDLE_LIMIT);
             });
 

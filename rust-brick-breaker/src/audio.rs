@@ -4,8 +4,8 @@ use crossbeam_queue::ArrayQueue;
 use maudio::{
     audio::sample_rate::SampleRate,
     device::{
-        device_builder::{DeviceBuilder, DeviceBuilderOps},
         Device, DeviceOps,
+        device_builder::{DeviceBuilder, DeviceBuilderOps},
     },
 };
 

@@ -42,8 +42,8 @@ pub struct Physics {
 
 impl Physics {
     pub fn new() -> Result<Self> {
-        let foundation = Foundation::initialize_default()
-            .context("initialize Box2D v3 foundation")?;
+        let foundation =
+            Foundation::initialize_default().context("initialize Box2D v3 foundation")?;
         let mut world = foundation
             .create_world(
                 WorldBuilder::from(foundation.world_def())
@@ -106,8 +106,12 @@ impl Physics {
             ball_body,
             remaining_bricks: 0,
         };
-        physics.shape_roles.insert(paddle_shape_id, ColliderRole::Paddle);
-        physics.shape_roles.insert(ball_shape_id, ColliderRole::Ball);
+        physics
+            .shape_roles
+            .insert(paddle_shape_id, ColliderRole::Paddle);
+        physics
+            .shape_roles
+            .insert(ball_shape_id, ColliderRole::Ball);
         physics.create_walls()?;
         physics.create_bricks()?;
 
@@ -181,10 +185,7 @@ impl Physics {
                 )
                 .enable_contact_events(true)
                 .build()?;
-            let shape = self
-                .world
-                .body(body)?
-                .create_box(&definition, 0.46, 0.17)?;
+            let shape = self.world.body(body)?.create_box(&definition, 0.46, 0.17)?;
             self.shape_roles.insert(shape, ColliderRole::Brick(index));
             self.brick_bodies[index] = Some(body);
             let slot = index + 2;

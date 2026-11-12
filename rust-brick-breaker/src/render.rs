@@ -49,13 +49,17 @@ unsafe impl Send for SdlWindowHandle<'_> {}
 unsafe impl Sync for SdlWindowHandle<'_> {}
 
 impl HasWindowHandle for SdlWindowHandle<'_> {
-    fn window_handle(&self) -> std::result::Result<wgpu::rwh::WindowHandle<'_>, wgpu::rwh::HandleError> {
+    fn window_handle(
+        &self,
+    ) -> std::result::Result<wgpu::rwh::WindowHandle<'_>, wgpu::rwh::HandleError> {
         self.0.window_handle()
     }
 }
 
 impl HasDisplayHandle for SdlWindowHandle<'_> {
-    fn display_handle(&self) -> std::result::Result<wgpu::rwh::DisplayHandle<'_>, wgpu::rwh::HandleError> {
+    fn display_handle(
+        &self,
+    ) -> std::result::Result<wgpu::rwh::DisplayHandle<'_>, wgpu::rwh::HandleError> {
         self.0.display_handle()
     }
 }
@@ -73,9 +77,8 @@ pub struct Renderer<'window> {
 impl<'window> Renderer<'window> {
     pub async fn new(window: &'window Window) -> Result<Self> {
         let (width, height) = window.size_in_pixels();
-        let instance = wgpu::Instance::new(
-            wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
-        );
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let surface = instance
             .create_surface(SdlWindowHandle(window))
             .map_err(|error| anyhow::anyhow!(error.to_string()))
@@ -194,14 +197,7 @@ impl<'window> Renderer<'window> {
             let center_y = item.y / (WORLD_HEIGHT * 0.5) - 1.0;
             let width = item.width / WORLD_HALF_WIDTH;
             let height = item.height / (WORLD_HEIGHT * 0.5);
-            push_rectangle(
-                &mut vertices,
-                center_x,
-                center_y,
-                width,
-                height,
-                item.color,
-            );
+            push_rectangle(&mut vertices, center_x, center_y, width, height, item.color);
         }
 
         push_text(
