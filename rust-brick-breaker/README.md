@@ -16,7 +16,7 @@ Standalone Rust proof of stack for a classic Brick Breaker game. The prototype i
 ### Linux x64
 
 - Ubuntu 24.04 or a compatible distribution.
-- C/C++ compiler, linker, CMake, Ninja, pkg-config, Git and libclang development files.
+- C/C++ compiler, linker, CMake, Ninja, pkg-config, Git and libclang development files, including X11 XTest (`libxtst-dev`).
 - SDL3 build dependencies: X11, Wayland, XKB, EGL/OpenGL, DRM/GBM, udev, ALSA, PulseAudio and PipeWire development packages. The CI workflow installs the corresponding Ubuntu packages.
 - Rust stable toolchain 1.97.0 or newer.
 - Node.js 22.x and npm.
