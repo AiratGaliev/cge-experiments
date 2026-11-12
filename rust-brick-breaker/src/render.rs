@@ -237,12 +237,15 @@ impl<'window> Renderer<'window> {
             );
         }
         if matches!(game.status, GameStatus::Victory | GameStatus::GameOver) {
+            let restart_text = "SPACE TO RESTART";
+            let scale = 0.016;
+            let text_width = restart_text.chars().count() as f32 * 6.0 * scale;
             push_text(
                 &mut vertices,
-                "SPACE TO RESTART",
-                -0.40,
+                restart_text,
+                -text_width * 0.5,
                 -0.02,
-                0.016,
+                scale,
                 [0.82, 0.88, 0.98, 1.0],
             );
         }
@@ -351,9 +354,11 @@ fn glyph_rows(character: char) -> [u8; 7] {
         'C' => [14, 17, 16, 16, 16, 17, 14],
         'E' => [31, 16, 16, 30, 16, 16, 31],
         'G' => [14, 17, 16, 23, 17, 17, 15],
+        'H' => [17, 17, 17, 31, 17, 17, 17],
         'I' => [31, 4, 4, 4, 4, 4, 31],
         'L' => [16, 16, 16, 16, 16, 16, 31],
         'M' => [17, 27, 21, 21, 17, 17, 17],
+        'N' => [17, 25, 25, 21, 19, 19, 17],
         'O' => [14, 17, 17, 17, 17, 17, 14],
         'P' => [30, 17, 17, 30, 16, 16, 16],
         'R' => [30, 17, 17, 30, 20, 18, 17],
@@ -392,5 +397,17 @@ mod tests {
         let mut vertices = Vec::new();
         push_text(&mut vertices, "SCORE 42", -0.5, 0.5, 0.02, [1.0; 4]);
         assert!(!vertices.is_empty());
+    }
+
+    #[test]
+    fn bitmap_font_covers_every_game_status_prompt() {
+        for prompt in ["SPACE TO LAUNCH", "SPACE TO RESTART", "VICTORY", "GAME OVER"] {
+            for character in prompt.chars().filter(|character| *character != ' ') {
+                assert!(
+                    glyph_rows(character).iter().any(|row| *row != 0),
+                    "missing bitmap glyph for {character} in {prompt}"
+                );
+            }
+        }
     }
 }
