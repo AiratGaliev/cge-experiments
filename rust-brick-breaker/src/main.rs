@@ -146,7 +146,7 @@ fn run_game(sdl: sdl3::Sdl, window: Window) -> Result<()> {
                     physics.launch()?;
                 }
                 GameStatus::Victory | GameStatus::GameOver => {
-                    snapshot = scripting.restart()?;
+                    let _ = scripting.restart()?;
                     physics.reset()?;
                     scene.reset_paddle();
                     scene.reset_bricks();
