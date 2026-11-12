@@ -12,7 +12,7 @@ boxdd = "=0.6.0"
 bytemuck = { version = "=1.25.0", features = ["derive"] }
 crossbeam-queue = "=0.3.12"
 flecs_ecs = "=0.2.2"
-maudio = { version = "=0.1.15", default-features = false }
+maudio = { version = "=0.1.15", default-features = false, features = ["engine"] }
 pollster = "=0.4.0"
 rquickjs = { version = "=0.14.0", features = ["std"] }
 sdl3 = { version = "=0.22.1", features = ["build-from-source", "raw-window-handle"] }

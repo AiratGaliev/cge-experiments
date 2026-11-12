@@ -22,7 +22,7 @@ Standalone Rust proof of stack for a classic Brick Breaker game. The prototype i
 - Node.js 22.x and npm.
 - A working Vulkan or OpenGL-capable GPU driver and a desktop session for interactive execution.
 
-SDL3 is built from source through the crate's `build-from-source` feature. The game uses SDL3 only for its window, input and OS event lifecycle; rendering is performed by wgpu. maudio uses pregenerated bindings for the Windows x64 and Linux x64 targets, so it does not require a second bindgen version.
+SDL3 is built from source through the crate's `build-from-source` feature. The game uses SDL3 only for its window, input and OS event lifecycle; rendering is performed by wgpu. maudio's engine feature is enabled because its low-level device modules share internal engine callback types; the engine does not participate in the game's audio callback. maudio uses pregenerated bindings for Windows x64 and Linux x64, so it does not require a second bindgen version.
 
 ## Build and run
 
