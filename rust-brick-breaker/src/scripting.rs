@@ -88,7 +88,7 @@ impl ScriptEngine {
     }
 
     fn read_snapshot(&self) -> Result<GameSnapshot> {
-        self.context.with(|ctx| read_snapshot(ctx))
+        self.context.with(read_snapshot)
     }
 }
 

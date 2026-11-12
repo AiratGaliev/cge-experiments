@@ -204,7 +204,7 @@ impl Physics {
             return Ok(());
         }
 
-        let current_x = self.world.body(self.paddle_body)?.position()?.x as f32;
+        let current_x = self.world.body(self.paddle_body)?.position()?.x;
         let target_x = target_x.clamp(-3.75, 3.75);
         let velocity_x = ((target_x - current_x) / fixed_step).clamp(-12.0, 12.0);
         self.world
@@ -214,7 +214,7 @@ impl Physics {
     }
 
     pub fn launch(&mut self) -> Result<()> {
-        let paddle_x = self.world.body(self.paddle_body)?.position()?.x as f32;
+        let paddle_x = self.world.body(self.paddle_body)?.position()?.x;
         self.world
             .body(self.ball_body)?
             .set_position_and_rotation([paddle_x, 0.98], 0.0)?;
@@ -225,7 +225,7 @@ impl Physics {
     }
 
     pub fn park_ball(&mut self) -> Result<()> {
-        let paddle_x = self.world.body(self.paddle_body)?.position()?.x as f32;
+        let paddle_x = self.world.body(self.paddle_body)?.position()?.x;
         self.world
             .body(self.ball_body)?
             .set_position_and_rotation([paddle_x, 0.98], 0.0)?;
@@ -236,17 +236,17 @@ impl Physics {
     }
 
     pub fn step(&mut self, delta_seconds: f32) -> Result<PhysicsStep> {
-        let completed = self.world.step(delta_seconds, FIXED_SUB_STEPS)?;
-        let contacts = completed
-            .contact_events()
-            .context("read Box2D v3 contact events")?;
-        let pairs: Vec<(ShapeId, ShapeId)> = contacts
-            .begin()
-            .iter()
-            .map(|event| (event.shape_a, event.shape_b))
-            .collect();
-        drop(contacts);
-        drop(completed);
+        let pairs: Vec<(ShapeId, ShapeId)> = {
+            let completed = self.world.step(delta_seconds, FIXED_SUB_STEPS)?;
+            let contacts = completed
+                .contact_events()
+                .context("read Box2D v3 contact events")?;
+            contacts
+                .begin()
+                .iter()
+                .map(|event| (event.shape_a, event.shape_b))
+                .collect()
+        };
 
         let mut destroyed = HashSet::new();
         let mut bounced = false;
@@ -254,18 +254,16 @@ impl Physics {
         for (shape_a, shape_b) in pairs {
             let role_a = self.shape_roles.get(&shape_a).copied();
             let role_b = self.shape_roles.get(&shape_b).copied();
-            if role_a == Some(ColliderRole::Ball) || role_b == Some(ColliderRole::Ball) {
-                bounced = true;
-                if let Some(ColliderRole::Brick(index)) = role_a {
-                    if role_b == Some(ColliderRole::Ball) {
-                        destroyed.insert(index);
-                    }
+            match (role_a, role_b) {
+                (Some(ColliderRole::Ball), Some(ColliderRole::Brick(index)))
+                | (Some(ColliderRole::Brick(index)), Some(ColliderRole::Ball)) => {
+                    bounced = true;
+                    destroyed.insert(index);
                 }
-                if let Some(ColliderRole::Brick(index)) = role_b {
-                    if role_a == Some(ColliderRole::Ball) {
-                        destroyed.insert(index);
-                    }
+                (Some(ColliderRole::Ball), _) | (_, Some(ColliderRole::Ball)) => {
+                    bounced = true;
                 }
+                _ => {}
             }
         }
 
@@ -276,7 +274,7 @@ impl Physics {
         }
         bricks_destroyed.sort_unstable();
 
-        let ball_lost = (self.world.body(self.ball_body)?.position()?.y as f32) < -0.20;
+        let ball_lost = (self.world.body(self.ball_body)?.position()?.y) < -0.20;
         Ok(PhysicsStep {
             bounced,
             bricks_destroyed,
@@ -308,7 +306,7 @@ impl Physics {
                 continue;
             };
             let position = self.world.body(*body)?.position()?;
-            positions.insert(slot as u32, [position.x as f32, position.y as f32]);
+            positions.insert(slot as u32, [position.x, position.y]);
         }
         Ok(positions)
     }
@@ -329,6 +327,7 @@ impl Physics {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn remaining_bricks(&self) -> usize {
         self.remaining_bricks
     }
