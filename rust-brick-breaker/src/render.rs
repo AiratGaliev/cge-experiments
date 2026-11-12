@@ -401,7 +401,12 @@ mod tests {
 
     #[test]
     fn bitmap_font_covers_every_game_status_prompt() {
-        for prompt in ["SPACE TO LAUNCH", "SPACE TO RESTART", "VICTORY", "GAME OVER"] {
+        for prompt in [
+            "SPACE TO LAUNCH",
+            "SPACE TO RESTART",
+            "VICTORY",
+            "GAME OVER",
+        ] {
             for character in prompt.chars().filter(|character| *character != ' ') {
                 assert!(
                     glyph_rows(character).iter().any(|row| *row != 0),
