@@ -22,49 +22,12 @@ concurrency:
   group: native-brick-breaker-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
-  lockfile:
-    name: Resolve, format and commit task lock
-    runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: rust-brick-breaker
-    steps:
-      - name: Checkout task branch
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref_name }}
-          fetch-depth: 0
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.97.0
-          components: rustfmt
-
-      - name: Generate reproducible dependency lock
-        run: cargo generate-lockfile
-
-      - name: Format Rust sources
-        run: cargo fmt --all
-
-      - name: Commit lockfile and formatting when changed
-        env:
-          TARGET_REF: ${{ github.head_ref || github.ref_name }}
-        run: |
-          git add Cargo.lock src build.rs
-          if git diff --cached --quiet; then
-            echo "Cargo.lock and Rust formatting are already up to date."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "chore(COD-115): pin dependencies and format Rust sources [skip ci]"
-          git push origin "HEAD:${TARGET_REF}"
-
   verify:
     name: verify (${{ matrix.os }})
-    needs: lockfile
     strategy:
       fail-fast: false
       matrix:
@@ -133,10 +96,10 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Run unit and integration tests
-        run: cargo test --all-targets --locked
+        run: cargo test --all-targets --locked --locked
 
       - name: Link native application executable
         run: cargo build --locked
 
       - name: Check native application target
-        run: cargo check --all-targets --locked
+        run: cargo check --all-targets --locked --locked
