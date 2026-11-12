@@ -89,6 +89,7 @@ impl<'window> Renderer<'window> {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .context("no compatible wgpu adapter is available")?;
