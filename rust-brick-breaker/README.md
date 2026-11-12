@@ -140,6 +140,6 @@ Primary sources:
 
 ## Automated checks and limitations
 
-The focused GitHub Actions workflow runs TypeScript build/tests, Rust formatting, Clippy, unit tests and native target compilation on Windows x64 and Linux x64. It is scoped to this prototype and its workflow file. It generates `Cargo.lock` from exact direct dependency pins and commits the resulting transitive dependency graph to the task branch before platform builds.
+The focused GitHub Actions workflow runs TypeScript build/tests, Rust formatting, Clippy, unit tests and native target compilation on Windows x64 and Linux x64. It is scoped to this prototype and its workflow file. TypeScript dependencies are installed with `npm ci`, and Cargo validation/build commands use the committed `Cargo.lock` with `--locked`. CI therefore verifies the committed dependency graph and does not regenerate or commit lockfile changes.
 
 This is a proof of stack, not a production game engine or release-ready game. It intentionally excludes asset loading, save data, level progression, gamepad support, audio asset decoding, mobile, WASM, packaging, store distribution and production telemetry. CI compilation does not prove a physical GPU presentation path or that a desktop audio device is available; those two runtime behaviors still require execution on Windows and Linux desktop sessions.
