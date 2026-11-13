@@ -17,7 +17,7 @@ use winit::{
 use native_brick_breaker::{
     audio::Audio,
     ecs::EcsWorld,
-    input::{key_name, GamepadManager, GamepadState, InputState},
+    input::{GamepadManager, GamepadState, InputState, key_name},
     physics::PhysicsWorld,
     render::Renderer,
     scripting::{RuntimeCommand, ScriptEngine},
@@ -54,8 +54,8 @@ impl Runtime {
             .context("initialize wgpu renderer for the winit window")?;
         let audio = Audio::new();
         let mut scene = EcsWorld::new();
-        let mut physics = PhysicsWorld::new([0.0, 0.0])
-            .context("initialize Avian 2D physics configuration")?;
+        let mut physics =
+            PhysicsWorld::new([0.0, 0.0]).context("initialize Avian 2D physics configuration")?;
         physics.configure_world(scene.world_mut());
 
         let script = ScriptEngine::new(script_path, audio.sample_queue())
@@ -164,10 +164,7 @@ impl Runtime {
         self.physics
             .drain_position_changes_into(&mut self.moved_positions);
         self.scene
-            .synchronize_physics_adaptive(
-                &self.moved_positions,
-                self.physics.positions_ref(),
-            )
+            .synchronize_physics_adaptive(&self.moved_positions, self.physics.positions_ref())
             .context("synchronize Avian positions into Bevy ECS scene transforms")?;
 
         self.scene.draw_rectangles_into(&mut self.rectangles);

@@ -3,8 +3,7 @@ use std::{collections::HashMap, time::Duration};
 use anyhow::{Result, bail};
 use avian2d::prelude::{
     Collider, ColliderDensity, CollisionEventsEnabled, CollisionStart, Friction, Gravity,
-    GravityScale, LinearVelocity, Position, Restitution, RigidBody, Rotation,
-    SweptCcd,
+    GravityScale, LinearVelocity, Position, Restitution, RigidBody, Rotation, SweptCcd,
 };
 use bevy_ecs::{
     component::Component,
@@ -297,9 +296,7 @@ impl PhysicsWorld {
         world
             .resource_mut::<Time>()
             .advance_by(Duration::from_secs_f32(delta_seconds));
-        world
-            .resource_mut::<Messages<CollisionStart>>()
-            .update();
+        world.resource_mut::<Messages<CollisionStart>>().update();
         world.run_schedule(NativePhysicsSchedule);
 
         let messages = world.resource::<Messages<CollisionStart>>();
@@ -333,13 +330,10 @@ impl PhysicsWorld {
             if current.iter().any(|value| !value.is_finite()) {
                 bail!("Avian produced a non-finite position for runtime entity {entity_id}");
             }
-            let changed = self
-                .positions
-                .get(&entity_id)
-                .is_none_or(|previous| {
-                    (previous[0] - current[0]).abs() > 0.000001
-                        || (previous[1] - current[1]).abs() > 0.000001
-                });
+            let changed = self.positions.get(&entity_id).is_none_or(|previous| {
+                (previous[0] - current[0]).abs() > 0.000001
+                    || (previous[1] - current[1]).abs() > 0.000001
+            });
             if changed {
                 self.positions.insert(entity_id, current);
                 self.position_changes.push(PhysicsPositionChange {
@@ -538,7 +532,10 @@ mod tests {
             .get::<LinearVelocity>(ball_entity)
             .unwrap()
             .0;
-        assert!(velocity.x < 0.0, "ball should rebound from the wall: {velocity:?}");
+        assert!(
+            velocity.x < 0.0,
+            "ball should rebound from the wall: {velocity:?}"
+        );
         assert!(collisions.iter().any(|event| {
             (event.entity_a == 100 && event.entity_b == 200)
                 || (event.entity_a == 200 && event.entity_b == 100)
@@ -624,8 +621,10 @@ mod tests {
             .step_into(scene.world_mut(), 1.0 / 60.0, &mut Vec::new())
             .unwrap();
         physics.drain_position_changes_into(&mut changes);
-        assert!(changes.iter().any(|change| {
-            change.entity_id == 3 && change.position == [-2.0, 1.0]
-        }));
+        assert!(
+            changes
+                .iter()
+                .any(|change| { change.entity_id == 3 && change.position == [-2.0, 1.0] })
+        );
     }
 }

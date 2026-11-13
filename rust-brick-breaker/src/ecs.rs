@@ -230,7 +230,10 @@ impl EcsWorld {
         let native_id = self.native_entities.remove(&entity_id)
             .ok_or_else(|| anyhow::anyhow!("unknown runtime entity {entity_id}"))?;
         self.app.world_mut().despawn(native_id);
-        let mut pending = self.app.world_mut().resource_mut::<PendingScriptChanges>();
+        let mut pending = self
+            .app
+            .world_mut()
+            .resource_mut::<PendingScriptChanges>();
         pending.transforms.remove(&entity_id);
         pending.text.remove(&entity_id);
         Ok(())
@@ -293,7 +296,10 @@ impl EcsWorld {
         let mut query = world.query::<(&VisualTransform, &Rectangle)>();
         for (transform, rectangle) in query.iter(world) {
             output.push(DrawRectangle {
-                x: transform.x, y: transform.y, width: transform.width, height: transform.height,
+                x: transform.x,
+                y: transform.y,
+                width: transform.width,
+                height: transform.height,
                 color: rectangle.color,
             });
         }
@@ -311,7 +317,10 @@ impl EcsWorld {
         let mut query = world.query::<(&VisualTransform, &Circle)>();
         for (transform, circle) in query.iter(world) {
             output.push(DrawCircle {
-                x: transform.x, y: transform.y, radius: circle.radius, color: circle.color,
+                x: transform.x,
+                y: transform.y,
+                radius: circle.radius,
+                color: circle.color,
             });
         }
     }
@@ -328,7 +337,10 @@ impl EcsWorld {
         let mut query = world.query::<(&VisualTransform, &TextLabel)>();
         for (transform, label) in query.iter(world) {
             output.push(DrawText {
-                x: transform.x, y: transform.y, scale: label.scale, color: label.color,
+                x: transform.x,
+                y: transform.y,
+                scale: label.scale,
+                color: label.color,
                 value: label.value.clone(),
             });
         }
@@ -362,8 +374,12 @@ mod tests {
     #[test]
     fn bevy_ecs_owns_entities_and_produces_render_data() {
         let mut world = EcsWorld::new();
-        world.create_rectangle(1, 0.0, -2.0, 1.0, 0.2, [0.2, 0.8, 1.0, 1.0]).unwrap();
-        world.create_text(2, "LABEL 0".into(), -0.9, 0.9, 0.02, [1.0; 4]).unwrap();
+        world
+            .create_rectangle(1, 0.0, -2.0, 1.0, 0.2, [0.2, 0.8, 1.0, 1.0])
+            .unwrap();
+        world
+            .create_text(2, "LABEL 0".into(), -0.9, 0.9, 0.02, [1.0; 4])
+            .unwrap();
         assert_eq!(world.entity_count(), 2);
         assert_eq!(world.draw_rectangles().len(), 1);
         assert_eq!(world.draw_text()[0].value, "LABEL 0");
@@ -372,7 +388,9 @@ mod tests {
     #[test]
     fn scheduled_systems_apply_script_changes_in_order() {
         let mut world = EcsWorld::new();
-        world.create_rectangle(7, 0.0, 0.0, 1.0, 1.0, [1.0; 4]).unwrap();
+        world
+            .create_rectangle(7, 0.0, 0.0, 1.0, 1.0, [1.0; 4])
+            .unwrap();
         world.set_position(7, -1.0, -2.0).unwrap();
         world.apply_pending_changes();
         let rectangle = world.draw_rectangles()[0];
@@ -382,15 +400,23 @@ mod tests {
     #[test]
     fn physics_and_scene_share_one_ecs_world() {
         let mut world = EcsWorld::new();
-        world.create_rectangle(1, 0.0, 0.0, 1.0, 1.0, [1.0; 4]).unwrap();
+        world
+            .create_rectangle(1, 0.0, 0.0, 1.0, 1.0, [1.0; 4])
+            .unwrap();
         world.attach_physics(1).unwrap();
         assert!(world.entity_has_physics_link(1));
         let mut physics = PhysicsWorld::new([0.0, 0.0]).unwrap();
         physics.configure_world(world.world_mut());
-        physics.create_box(
-            world.world_mut(), 1, [0.0, 0.0], [1.0, 1.0], RigidBodyKind::Static,
-            PhysicsMaterial::default(),
-        ).unwrap();
+        physics
+            .create_box(
+                world.world_mut(),
+                1,
+                [0.0, 0.0],
+                [1.0, 1.0],
+                RigidBodyKind::Static,
+                PhysicsMaterial::default(),
+            )
+            .unwrap();
         assert_eq!(world.world_mut().entities().len(), 2);
     }
 
@@ -440,7 +466,9 @@ mod tests {
     #[test]
     fn destroying_entity_releases_its_bevy_ecs_record() {
         let mut world = EcsWorld::new();
-        world.create_rectangle(10, 0.0, 0.0, 1.0, 1.0, [1.0; 4]).unwrap();
+        world
+            .create_rectangle(10, 0.0, 0.0, 1.0, 1.0, [1.0; 4])
+            .unwrap();
         world.destroy_entity(10).unwrap();
         assert_eq!(world.entity_count(), 0);
         assert!(world.draw_rectangles().is_empty());
@@ -449,14 +477,24 @@ mod tests {
     #[test]
     fn invalid_render_data_is_rejected() {
         let mut world = EcsWorld::new();
-        assert!(world.create_rectangle(1, 0.0, 0.0, 0.0, 1.0, [1.0; 4]).is_err());
-        assert!(world.create_circle(1, 0.0, 0.0, f32::NAN, [1.0; 4]).is_err());
+        assert!(
+            world
+                .create_rectangle(1, 0.0, 0.0, 0.0, 1.0, [1.0; 4])
+                .is_err()
+        );
+        assert!(
+            world
+                .create_circle(1, 0.0, 0.0, f32::NAN, [1.0; 4])
+                .is_err()
+        );
     }
 
     #[test]
     fn reusable_draw_output_keeps_capacity_between_frames() {
         let mut world = EcsWorld::new();
-        world.create_rectangle(1, 0.0, 0.0, 1.0, 1.0, [1.0, 0.0, 0.0, 1.0]).unwrap();
+        world
+            .create_rectangle(1, 0.0, 0.0, 1.0, 1.0, [1.0, 0.0, 0.0, 1.0])
+            .unwrap();
         let mut output = Vec::with_capacity(4);
         world.draw_rectangles_into(&mut output);
         let capacity = output.capacity();

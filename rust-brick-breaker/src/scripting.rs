@@ -726,7 +726,6 @@ mod tests {
         Arc::new(ArrayQueue::new(32_768))
     }
 
-
     #[test]
     fn gamepad_host_api_exposes_connection_axis_and_edge_triggered_buttons() {
         let script_source = r#"
