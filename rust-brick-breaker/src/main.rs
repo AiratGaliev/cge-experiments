@@ -208,6 +208,7 @@ impl RuntimeApp {
 impl ApplicationHandler for RuntimeApp {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
         if matches!(cause, StartCause::ResumeTimeReached { .. }) {
+            self.next_redraw = Some(Instant::now() + FRAME_INTERVAL);
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
             }
@@ -435,7 +436,8 @@ fn apply_commands(
                 position,
             } => physics.set_transform(scene.world_mut(), entity_id, position)?,
             RuntimeCommand::DestroyBody { entity_id } => {
-                physics.destroy_body(scene.world_mut(), entity_id)?
+                physics.destroy_body(scene.world_mut(), entity_id)?;
+                scene.detach_physics(entity_id)?;
             }
         }
     }

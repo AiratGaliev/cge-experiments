@@ -250,6 +250,18 @@ impl EcsWorld {
         Ok(())
     }
 
+    pub fn detach_physics(&mut self, entity_id: u32) -> Result<()> {
+        let native_id = *self
+            .native_entities
+            .get(&entity_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown runtime entity {entity_id}"))?;
+        self.app
+            .world_mut()
+            .entity_mut(native_id)
+            .remove::<PhysicsLink>();
+        Ok(())
+    }
+
     pub fn set_position(&mut self, entity_id: u32, x: f32, y: f32) -> Result<()> {
         if !self.native_entities.contains_key(&entity_id) {
             bail!("unknown runtime entity {entity_id}");
@@ -504,6 +516,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(world.world_mut().entities().len(), 2);
+    }
+
+    #[test]
+    fn detached_physics_body_leaves_visual_entity_alive_and_unlinked() {
+        let mut scene = EcsWorld::new();
+        scene
+            .create_circle(8, 0.0, 0.0, 0.1, [1.0; 4])
+            .unwrap();
+        scene.attach_physics(8).unwrap();
+        assert!(scene.entity_has_physics_link(8));
+
+        scene.detach_physics(8).unwrap();
+
+        assert!(!scene.entity_has_physics_link(8));
+        assert_eq!(scene.entity_count(), 1);
+        assert_eq!(scene.draw_circles().len(), 1);
     }
 
     #[test]
