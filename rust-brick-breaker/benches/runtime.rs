@@ -162,7 +162,11 @@ fn make_physics_world(body_count: u32) -> (EcsWorld, PhysicsWorld) {
             )
             .unwrap();
         world
-            .set_linear_velocity(scene.world_mut(), entity_id, [0.1, (entity_id % 5) as f32 * 0.02 - 0.04])
+            .set_linear_velocity(
+                scene.world_mut(),
+                entity_id,
+                [0.1, (entity_id % 5) as f32 * 0.02 - 0.04],
+            )
             .unwrap();
     }
     (scene, world)
@@ -185,7 +189,9 @@ fn bench_physics(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     collisions.clear();
-                    world.step_into(scene.world_mut(), FIXED_STEP, &mut collisions).unwrap();
+                    world
+                        .step_into(scene.world_mut(), FIXED_STEP, &mut collisions)
+                        .unwrap();
                     world.drain_position_changes_into(&mut position_changes);
                     black_box(&collisions);
                     black_box(&position_changes);
@@ -270,10 +276,19 @@ fn make_physics_scene(body_count: u32, moving_body_count: u32) -> (PhysicsWorld,
         scene.attach_physics(entity_id).unwrap();
 
         physics
-            .create_circle(scene.world_mut(), entity_id, position, 0.1, RigidBodyKind::Dynamic, material)
+            .create_circle(
+                scene.world_mut(),
+                entity_id,
+                position,
+                0.1,
+                RigidBodyKind::Dynamic,
+                material,
+            )
             .unwrap();
         if entity_id <= moving_body_count {
-            physics.set_linear_velocity(scene.world_mut(), entity_id, [0.4, 0.2]).unwrap();
+            physics
+                .set_linear_velocity(scene.world_mut(), entity_id, [0.4, 0.2])
+                .unwrap();
         }
     }
 
@@ -302,7 +317,9 @@ fn bench_physics_frame_sync(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("step_and_sync", id), |b| {
             b.iter(|| {
                 collisions.clear();
-                physics.step_into(scene.world_mut(), FIXED_STEP, &mut collisions).unwrap();
+                physics
+                    .step_into(scene.world_mut(), FIXED_STEP, &mut collisions)
+                    .unwrap();
                 physics.drain_position_changes_into(&mut position_changes);
                 scene
                     .synchronize_physics_adaptive(&position_changes, physics.positions_ref())

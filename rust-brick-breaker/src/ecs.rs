@@ -139,13 +139,24 @@ impl EcsWorld {
     }
 
     pub fn create_rectangle(
-        &mut self, entity_id: u32, x: f32, y: f32, width: f32, height: f32, color: [f32; 4],
+        &mut self,
+        entity_id: u32,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        color: [f32; 4],
     ) -> Result<()> {
         self.ensure_available(entity_id)?;
         validate_rect(x, y, width, height, color)?;
         let entity = self.app.world_mut().spawn((
             RuntimeEntityId(entity_id),
-            VisualTransform { x, y, width, height },
+            VisualTransform {
+                x,
+                y,
+                width,
+                height,
+            },
             Rectangle { color },
         ));
         self.native_entities.insert(entity_id, entity.id());
@@ -153,17 +164,30 @@ impl EcsWorld {
     }
 
     pub fn create_circle(
-        &mut self, entity_id: u32, x: f32, y: f32, radius: f32, color: [f32; 4],
+        &mut self,
+        entity_id: u32,
+        x: f32,
+        y: f32,
+        radius: f32,
+        color: [f32; 4],
     ) -> Result<()> {
         self.ensure_available(entity_id)?;
-        if !x.is_finite() || !y.is_finite() || !radius.is_finite() || radius <= 0.0
+        if !x.is_finite()
+            || !y.is_finite()
+            || !radius.is_finite()
+            || radius <= 0.0
             || color.iter().any(|channel| !channel.is_finite())
         {
             bail!("invalid circle entity data");
         }
         let entity = self.app.world_mut().spawn((
             RuntimeEntityId(entity_id),
-            VisualTransform { x, y, width: radius * 2.0, height: radius * 2.0 },
+            VisualTransform {
+                x,
+                y,
+                width: radius * 2.0,
+                height: radius * 2.0,
+            },
             Circle { radius, color },
         ));
         self.native_entities.insert(entity_id, entity.id());
@@ -171,18 +195,37 @@ impl EcsWorld {
     }
 
     pub fn create_text(
-        &mut self, entity_id: u32, value: String, x: f32, y: f32, scale: f32, color: [f32; 4],
+        &mut self,
+        entity_id: u32,
+        value: String,
+        x: f32,
+        y: f32,
+        scale: f32,
+        color: [f32; 4],
     ) -> Result<()> {
         self.ensure_available(entity_id)?;
-        if !x.is_finite() || !y.is_finite() || !scale.is_finite() || scale <= 0.0
-            || value.len() > 256 || color.iter().any(|channel| !channel.is_finite())
+        if !x.is_finite()
+            || !y.is_finite()
+            || !scale.is_finite()
+            || scale <= 0.0
+            || value.len() > 256
+            || color.iter().any(|channel| !channel.is_finite())
         {
             bail!("invalid text entity data");
         }
         let entity = self.app.world_mut().spawn((
             RuntimeEntityId(entity_id),
-            VisualTransform { x, y, width: 0.0, height: 0.0 },
-            TextLabel { value, scale, color },
+            VisualTransform {
+                x,
+                y,
+                width: 0.0,
+                height: 0.0,
+            },
+            TextLabel {
+                value,
+                scale,
+                color,
+            },
         ));
         self.native_entities.insert(entity_id, entity.id());
         Ok(())
@@ -196,9 +239,14 @@ impl EcsWorld {
     }
 
     pub fn attach_physics(&mut self, entity_id: u32) -> Result<()> {
-        let native_id = *self.native_entities.get(&entity_id)
+        let native_id = *self
+            .native_entities
+            .get(&entity_id)
             .ok_or_else(|| anyhow::anyhow!("unknown runtime entity {entity_id}"))?;
-        self.app.world_mut().entity_mut(native_id).insert(PhysicsLink);
+        self.app
+            .world_mut()
+            .entity_mut(native_id)
+            .insert(PhysicsLink);
         Ok(())
     }
 
@@ -209,8 +257,11 @@ impl EcsWorld {
         if !x.is_finite() || !y.is_finite() {
             bail!("entity position must be finite");
         }
-        self.app.world_mut().resource_mut::<PendingScriptChanges>()
-            .transforms.insert(entity_id, [x, y]);
+        self.app
+            .world_mut()
+            .resource_mut::<PendingScriptChanges>()
+            .transforms
+            .insert(entity_id, [x, y]);
         Ok(())
     }
 
@@ -221,19 +272,21 @@ impl EcsWorld {
         if value.len() > 256 {
             bail!("text label exceeds 256 bytes");
         }
-        self.app.world_mut().resource_mut::<PendingScriptChanges>()
-            .text.insert(entity_id, value);
+        self.app
+            .world_mut()
+            .resource_mut::<PendingScriptChanges>()
+            .text
+            .insert(entity_id, value);
         Ok(())
     }
 
     pub fn destroy_entity(&mut self, entity_id: u32) -> Result<()> {
-        let native_id = self.native_entities.remove(&entity_id)
+        let native_id = self
+            .native_entities
+            .remove(&entity_id)
             .ok_or_else(|| anyhow::anyhow!("unknown runtime entity {entity_id}"))?;
         self.app.world_mut().despawn(native_id);
-        let mut pending = self
-            .app
-            .world_mut()
-            .resource_mut::<PendingScriptChanges>();
+        let mut pending = self.app.world_mut().resource_mut::<PendingScriptChanges>();
         pending.transforms.remove(&entity_id);
         pending.text.remove(&entity_id);
         Ok(())
@@ -249,9 +302,15 @@ impl EcsWorld {
 
     pub fn synchronize_physics_changes(&mut self, changes: &[PhysicsPositionChange]) -> Result<()> {
         for change in changes {
-            let Some(&native_id) = self.native_entities.get(&change.entity_id) else { continue; };
-            let Some(mut transform) = self.app.world_mut().get_mut::<VisualTransform>(native_id) else {
-                bail!("physics-linked ECS entity {} has no VisualTransform", change.entity_id);
+            let Some(&native_id) = self.native_entities.get(&change.entity_id) else {
+                continue;
+            };
+            let Some(mut transform) = self.app.world_mut().get_mut::<VisualTransform>(native_id)
+            else {
+                bail!(
+                    "physics-linked ECS entity {} has no VisualTransform",
+                    change.entity_id
+                );
             };
             transform.x = change.position[0];
             transform.y = change.position[1];
@@ -260,18 +319,33 @@ impl EcsWorld {
     }
 
     pub fn synchronize_physics_adaptive(
-        &mut self, changes: &[PhysicsPositionChange], positions: &PositionMap,
+        &mut self,
+        changes: &[PhysicsPositionChange],
+        positions: &PositionMap,
     ) -> Result<()> {
-        if changes.is_empty() || positions.is_empty() { return Ok(()); }
+        if changes.is_empty() || positions.is_empty() {
+            return Ok(());
+        }
         if changes.len().saturating_mul(2) >= positions.len() {
             self.physics_sync_candidates.clear();
-            self.physics_sync_candidates.extend(changes.iter().map(|change| change.entity_id));
-            let updates = self.native_entities.iter().filter_map(|(entity_id, entity)| {
-                if !self.physics_sync_candidates.contains(entity_id) { return None; }
-                positions.get(entity_id).copied().map(|position| (*entity, position, *entity_id))
-            }).collect::<Vec<_>>();
+            self.physics_sync_candidates
+                .extend(changes.iter().map(|change| change.entity_id));
+            let updates = self
+                .native_entities
+                .iter()
+                .filter_map(|(entity_id, entity)| {
+                    if !self.physics_sync_candidates.contains(entity_id) {
+                        return None;
+                    }
+                    positions
+                        .get(entity_id)
+                        .copied()
+                        .map(|position| (*entity, position, *entity_id))
+                })
+                .collect::<Vec<_>>();
             for (entity, position, entity_id) in updates {
-                let Some(mut transform) = self.app.world_mut().get_mut::<VisualTransform>(entity) else {
+                let Some(mut transform) = self.app.world_mut().get_mut::<VisualTransform>(entity)
+                else {
                     bail!("physics-linked ECS entity {entity_id} has no VisualTransform");
                 };
                 transform.x = position[0];
@@ -346,24 +420,36 @@ impl EcsWorld {
         }
     }
 
-    pub fn entity_count(&self) -> usize { self.native_entities.len() }
+    pub fn entity_count(&self) -> usize {
+        self.native_entities.len()
+    }
 
     #[cfg(test)]
     pub(crate) fn entity_has_physics_link(&mut self, entity_id: u32) -> bool {
-        self.native_entities.get(&entity_id)
+        self.native_entities
+            .get(&entity_id)
             .is_some_and(|entity| self.app.world().get::<PhysicsLink>(*entity).is_some())
     }
 }
 
 fn validate_rect(x: f32, y: f32, width: f32, height: f32, color: [f32; 4]) -> Result<()> {
-    if !x.is_finite() || !y.is_finite() || !width.is_finite() || !height.is_finite()
-        || width <= 0.0 || height <= 0.0 || color.iter().any(|channel| !channel.is_finite())
-    { bail!("invalid rectangle entity data"); }
+    if !x.is_finite()
+        || !y.is_finite()
+        || !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+        || color.iter().any(|channel| !channel.is_finite())
+    {
+        bail!("invalid rectangle entity data");
+    }
     Ok(())
 }
 
 impl Default for EcsWorld {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
