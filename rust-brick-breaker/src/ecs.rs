@@ -328,6 +328,12 @@ impl EcsWorld {
 
     pub fn draw_rectangles(&self) -> Vec<DrawRectangle> {
         let mut items = Vec::with_capacity(self.native_entities.len());
+        self.draw_rectangles_into(&mut items);
+        items
+    }
+
+    pub fn draw_rectangles_into(&self, items: &mut Vec<DrawRectangle>) {
+        items.clear();
         self.world
             .new_query::<(&Transform, &Rectangle)>()
             .each(|(transform, rectangle)| {
@@ -339,11 +345,16 @@ impl EcsWorld {
                     color: rectangle.color,
                 });
             });
-        items
     }
 
     pub fn draw_circles(&self) -> Vec<DrawCircle> {
         let mut items = Vec::new();
+        self.draw_circles_into(&mut items);
+        items
+    }
+
+    pub fn draw_circles_into(&self, items: &mut Vec<DrawCircle>) {
+        items.clear();
         self.world
             .new_query::<(&Transform, &Circle)>()
             .each(|(transform, circle)| {
@@ -354,23 +365,37 @@ impl EcsWorld {
                     color: circle.color,
                 });
             });
-        items
     }
 
     pub fn draw_text(&self) -> Vec<DrawText> {
         let mut items = Vec::new();
+        self.draw_text_into(&mut items);
+        items
+    }
+
+    pub fn draw_text_into(&self, items: &mut Vec<DrawText>) {
+        let mut index = 0;
         self.world
             .new_query::<(&Transform, &TextLabel)>()
             .each(|(transform, label)| {
-                items.push(DrawText {
-                    x: transform.x,
-                    y: transform.y,
-                    scale: label.scale,
-                    color: label.color,
-                    value: label.value.clone(),
-                });
+                if let Some(item) = items.get_mut(index) {
+                    item.x = transform.x;
+                    item.y = transform.y;
+                    item.scale = label.scale;
+                    item.color = label.color;
+                    item.value.clone_from(&label.value);
+                } else {
+                    items.push(DrawText {
+                        x: transform.x,
+                        y: transform.y,
+                        scale: label.scale,
+                        color: label.color,
+                        value: label.value.clone(),
+                    });
+                }
+                index += 1;
             });
-        items
+        items.truncate(index);
     }
 
     pub fn entity_count(&self) -> usize {
@@ -390,6 +415,12 @@ fn validate_rect(x: f32, y: f32, width: f32, height: f32, color: [f32; 4]) -> Re
         bail!("invalid rectangle entity data");
     }
     Ok(())
+}
+
+impl Default for EcsWorld {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -449,5 +480,27 @@ mod tests {
                 .create_rectangle(1, 0.0, 0.0, 0.0, 1.0, [1.0; 4])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn reusable_draw_output_keeps_capacity_between_frames() {
+        let mut world = EcsWorld::new();
+        world
+            .create_rectangle(1, 0.0, 0.0, 1.0, 1.0, [1.0, 0.0, 0.0, 1.0])
+            .unwrap();
+        let mut output = Vec::with_capacity(4);
+
+        world.draw_rectangles_into(&mut output);
+        assert_eq!(output.len(), 1);
+        let capacity = output.capacity();
+
+        world.set_position(1, 2.0, 3.0).unwrap();
+        world.apply_pending_changes();
+        world.draw_rectangles_into(&mut output);
+
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].x, 2.0);
+        assert_eq!(output[0].y, 3.0);
+        assert_eq!(output.capacity(), capacity);
     }
 }

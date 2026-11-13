@@ -3,10 +3,7 @@ use std::{borrow::Cow, mem::size_of};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use sdl3::video::Window;
-use wgpu::{
-    rwh::{HasDisplayHandle, HasWindowHandle},
-    util::DeviceExt,
-};
+use wgpu::rwh::{HasDisplayHandle, HasWindowHandle};
 
 use crate::ecs::{DrawCircle, DrawRectangle, DrawText};
 
@@ -101,6 +98,9 @@ pub struct Renderer<'window> {
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     adapter_name: String,
+    vertices: Vec<Vertex>,
+    vertex_buffer: Option<wgpu::Buffer>,
+    vertex_buffer_capacity: u64,
 }
 
 impl<'window> Renderer<'window> {
@@ -185,6 +185,9 @@ impl<'window> Renderer<'window> {
             config,
             pipeline,
             adapter_name,
+            vertices: Vec::new(),
+            vertex_buffer: None,
+            vertex_buffer_capacity: 0,
         })
     }
 
@@ -226,18 +229,26 @@ impl<'window> Renderer<'window> {
             }
         };
 
-        let mut vertices =
-            Vec::with_capacity((rectangles.len() + circles.len() * 24 + texts.len() * 24) * 6);
+        let required_vertices = (rectangles.len() + circles.len() * 24 + texts.len() * 24) * 6;
+        self.vertices.clear();
+        self.vertices.reserve(required_vertices);
         for item in rectangles {
             let center_x = item.x / WORLD_HALF_WIDTH;
             let center_y = item.y / (WORLD_HEIGHT * 0.5);
             let width = item.width / WORLD_HALF_WIDTH;
             let height = item.height / (WORLD_HEIGHT * 0.5);
-            push_rectangle(&mut vertices, center_x, center_y, width, height, item.color);
+            push_rectangle(
+                &mut self.vertices,
+                center_x,
+                center_y,
+                width,
+                height,
+                item.color,
+            );
         }
         for item in circles {
             push_circle(
-                &mut vertices,
+                &mut self.vertices,
                 item.x / WORLD_HALF_WIDTH,
                 item.y / (WORLD_HEIGHT * 0.5),
                 item.radius / WORLD_HALF_WIDTH,
@@ -247,7 +258,7 @@ impl<'window> Renderer<'window> {
         }
         for item in texts {
             push_text(
-                &mut vertices,
+                &mut self.vertices,
                 &item.value,
                 item.x,
                 item.y,
@@ -256,13 +267,25 @@ impl<'window> Renderer<'window> {
             );
         }
 
+        let vertex_bytes = bytemuck::cast_slice(&self.vertices);
+        let required_buffer_size =
+            (vertex_bytes.len() as u64).max(std::mem::size_of::<Vertex>() as u64);
+        if self.vertex_buffer_capacity < required_buffer_size {
+            self.vertex_buffer_capacity = required_buffer_size.next_power_of_two();
+            self.vertex_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("CGE native runtime reusable frame vertices"),
+                size: self.vertex_buffer_capacity,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
         let vertex_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("CGE native runtime frame vertices"),
-                contents: bytemuck::cast_slice(&vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+            .vertex_buffer
+            .as_ref()
+            .expect("vertex buffer is allocated before rendering");
+        if !vertex_bytes.is_empty() {
+            self.queue.write_buffer(vertex_buffer, 0, vertex_bytes);
+        }
 
         let view = frame
             .texture
@@ -305,7 +328,7 @@ impl<'window> Renderer<'window> {
                 1.0,
             );
             pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            pass.draw(0..vertices.len() as u32, 0..1);
+            pass.draw(0..self.vertices.len() as u32, 0..1);
         }
 
         self.queue.submit(Some(encoder.finish()));

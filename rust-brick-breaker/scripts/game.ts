@@ -72,6 +72,7 @@ interface EntityApi {
     setText(entityId: number, value: string): void;
     getPositionX(entityId: number): number | undefined;
     getPositionY(entityId: number): number | undefined;
+    readPositions(entityIds: readonly number[], output: Float32Array): void;
     destroy(entityId: number): void;
 }
 
