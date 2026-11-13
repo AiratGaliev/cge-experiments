@@ -11,6 +11,7 @@ on:
   pull_request:
     branches:
       - main
+      - dev
     paths:
       - "rust-brick-breaker/**"
       - ".github/workflows/native-brick-breaker.yml"
