@@ -484,6 +484,68 @@ mod tests {
     }
 
     #[test]
+    fn avian_restitutes_a_dynamic_ball_from_a_static_wall_on_fixed_steps() {
+        let (mut scene, mut physics) = setup();
+        let surface = PhysicsMaterial {
+            density: 0.0,
+            friction: 0.0,
+            restitution: 1.0,
+            gravity_scale: 0.0,
+            bullet: false,
+        };
+        let ball_material = PhysicsMaterial {
+            density: 1.0,
+            friction: 0.0,
+            restitution: 1.0,
+            gravity_scale: 0.0,
+            bullet: false,
+        };
+
+        physics
+            .create_box(
+                scene.world_mut(),
+                100,
+                [0.0, 0.0],
+                [0.2, 4.0],
+                RigidBodyKind::Static,
+                surface,
+            )
+            .unwrap();
+        physics
+            .create_circle(
+                scene.world_mut(),
+                200,
+                [-1.0, 0.0],
+                0.2,
+                RigidBodyKind::Dynamic,
+                ball_material,
+            )
+            .unwrap();
+        physics
+            .set_linear_velocity(scene.world_mut(), 200, [12.0, 0.0])
+            .unwrap();
+
+        let mut collisions = Vec::new();
+        for _ in 0..30 {
+            physics
+                .step_into(scene.world_mut(), 1.0 / 60.0, &mut collisions)
+                .unwrap();
+        }
+
+        let ball_entity = physics.body_entity(200).unwrap();
+        let velocity = scene
+            .world_mut()
+            .get::<LinearVelocity>(ball_entity)
+            .unwrap()
+            .0;
+        assert!(velocity.x < 0.0, "ball should rebound from the wall: {velocity:?}");
+        assert!(collisions.iter().any(|event| {
+            (event.entity_a == 100 && event.entity_b == 200)
+                || (event.entity_a == 200 && event.entity_b == 100)
+        }));
+    }
+
+    #[test]
     fn invalid_body_data_and_duplicate_ids_are_rejected() {
         let (mut scene, mut physics) = setup();
         assert!(
