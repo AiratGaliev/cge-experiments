@@ -141,7 +141,7 @@ cargo run --locked
 | Gamepad South | Launch the ball; restart after Victory or Game Over |
 | Escape | Exit |
 
-Keyboard and controller directions are combined and clamped to the paddle's movement range. The active controller is the connected device with the lexicographically smallest hardware UUID, making selection independent of device enumeration and event arrival order. Disconnecting the active controller clears its held and edge-triggered state; the next eligible connected controller may become active. The South button uses just-pressed semantics so a held button does not repeatedly launch or restart the game.
+Keyboard and controller directions are combined and clamped to the paddle's movement range. The active controller is selected by the lexicographically smallest gilrs model UUID; identical models are ordered by the lowest `GamepadId`, which is stable for the lifetime of the current gilrs context. This selection is independent of iterator order and input event arrival order, but the `GamepadId` tiebreak is not a persistent hardware identity across application runs. Disconnecting the active controller clears its held and edge-triggered state; the next eligible connected controller may become active. The South button uses just-pressed semantics so a held button does not repeatedly launch or restart the game.
 
 The TypeScript sample creates 36 bricks, walls, a paddle, a ball and HUD labels. Avian 2D produces collision messages; the JavaScript game interprets those events, removes brick entities, awards score, tracks lives and chooses victory/game-over state. The Rust runtime has no Brick Breaker-specific collision roles, score counter or state machine.
 

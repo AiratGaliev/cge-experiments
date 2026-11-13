@@ -104,8 +104,10 @@ impl GamepadState {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GamepadSample {
-    /// gilrs hardware UUID. The lexicographically smallest connected UUID is active.
+    /// gilrs model UUID. Multiple physical controllers can share the same value.
     pub uuid: [u8; 16],
+    /// gilrs ID, unique and stable for the lifetime of its Gilrs context.
+    pub device_id: usize,
     pub left_stick_x: f32,
     pub dpad_left_down: bool,
     pub dpad_right_down: bool,
@@ -130,7 +132,7 @@ pub fn normalize_axis(value: f32) -> f32 {
 
 #[derive(Default)]
 pub struct GamepadStateTracker {
-    active_uuid: Option<[u8; 16]>,
+    active_device: Option<([u8; 16], usize)>,
     previous: GamepadState,
     state: GamepadState,
 }
@@ -138,20 +140,21 @@ pub struct GamepadStateTracker {
 impl GamepadStateTracker {
     pub fn update(&mut self, sample: Option<GamepadSample>) -> GamepadState {
         let Some(sample) = sample else {
-            self.active_uuid = None;
+            self.active_device = None;
             self.previous = GamepadState::default();
             self.state = GamepadState::default();
             return self.state;
         };
 
-        let same_device = self.active_uuid == Some(sample.uuid);
+        let device_key = (sample.uuid, sample.device_id);
+        let same_device = self.active_device == Some(device_key);
         let south_pressed = same_device && sample.south_down && !self.previous.south_down;
         let dpad_left_pressed =
             same_device && sample.dpad_left_down && !self.previous.dpad_left_down;
         let dpad_right_pressed =
             same_device && sample.dpad_right_down && !self.previous.dpad_right_down;
 
-        self.active_uuid = Some(sample.uuid);
+        self.active_device = Some(device_key);
         self.state = GamepadState {
             connected: true,
             left_stick_x: normalize_axis(sample.left_stick_x),
@@ -169,6 +172,17 @@ impl GamepadStateTracker {
     pub fn state(&self) -> GamepadState {
         self.state
     }
+}
+
+/// Selects the lowest model UUID, then the lowest Gilrs ID for identical models.
+/// The ID tiebreak is stable for the current Gilrs context and does not depend on
+/// iterator order or input event arrival order.
+fn select_active_gamepad(
+    samples: impl IntoIterator<Item = GamepadSample>,
+) -> Option<GamepadSample> {
+    samples
+        .into_iter()
+        .min_by_key(|sample| (sample.uuid, sample.device_id))
 }
 
 /// Optional gamepad backend. Its failure is non-fatal: keyboard input remains available.
@@ -210,14 +224,15 @@ impl GamepadManager {
         let selected = gilrs
             .gamepads()
             .filter(|(_, gamepad)| gamepad.is_connected())
-            .map(|(_, gamepad)| GamepadSample {
+            .map(|(id, gamepad)| GamepadSample {
                 uuid: gamepad.uuid(),
+                device_id: usize::from(id),
                 left_stick_x: gamepad.value(Axis::LeftStickX),
                 dpad_left_down: gamepad.is_pressed(Button::DPadLeft),
                 dpad_right_down: gamepad.is_pressed(Button::DPadRight),
                 south_down: gamepad.is_pressed(Button::South),
-            })
-            .min_by_key(|gamepad| gamepad.uuid);
+            });
+        let selected = select_active_gamepad(selected);
 
         self.tracker.update(selected)
     }
@@ -237,9 +252,10 @@ impl Default for GamepadManager {
 mod tests {
     use super::*;
 
-    fn sample(uuid: u8, south_down: bool) -> GamepadSample {
+    fn sample(uuid: u8, device_id: usize, south_down: bool) -> GamepadSample {
         GamepadSample {
             uuid: [uuid; 16],
+            device_id,
             south_down,
             ..GamepadSample::default()
         }
@@ -260,11 +276,11 @@ mod tests {
     #[test]
     fn gamepad_buttons_have_held_and_edge_triggered_states() {
         let mut tracker = GamepadStateTracker::default();
-        assert!(!tracker.update(Some(sample(1, false))).south_pressed);
-        let pressed = tracker.update(Some(sample(1, true)));
+        assert!(!tracker.update(Some(sample(1, 1, false))).south_pressed);
+        let pressed = tracker.update(Some(sample(1, 1, true)));
         assert!(pressed.south_down);
         assert!(pressed.south_pressed);
-        let held = tracker.update(Some(sample(1, true)));
+        let held = tracker.update(Some(sample(1, 1, true)));
         assert!(held.south_down);
         assert!(!held.south_pressed);
     }
@@ -272,17 +288,46 @@ mod tests {
     #[test]
     fn disconnect_clears_held_and_pressed_buttons() {
         let mut tracker = GamepadStateTracker::default();
-        tracker.update(Some(sample(1, false)));
-        tracker.update(Some(sample(1, true)));
+        tracker.update(Some(sample(1, 1, false)));
+        tracker.update(Some(sample(1, 1, true)));
         let disconnected = tracker.update(None);
         assert_eq!(disconnected, GamepadState::default());
     }
 
     #[test]
+    fn identical_model_controllers_use_lowest_gilrs_id_independent_of_iterator_order() {
+        let first_order = select_active_gamepad([
+            sample(1, 9, true),
+            sample(1, 3, false),
+            sample(1, 6, false),
+        ])
+        .unwrap();
+        let reverse_order = select_active_gamepad([
+            sample(1, 6, false),
+            sample(1, 3, false),
+            sample(1, 9, true),
+        ])
+        .unwrap();
+
+        assert_eq!(first_order.device_id, 3);
+        assert_eq!(reverse_order, first_order);
+    }
+
+    #[test]
+    fn switching_between_identical_model_controllers_does_not_synthesize_a_press() {
+        let mut tracker = GamepadStateTracker::default();
+        tracker.update(Some(sample(1, 3, false)));
+        let switched = tracker.update(Some(sample(1, 9, true)));
+        assert!(switched.connected);
+        assert!(switched.south_down);
+        assert!(!switched.south_pressed);
+    }
+
+    #[test]
     fn switching_active_controller_does_not_synthesize_a_button_press() {
         let mut tracker = GamepadStateTracker::default();
-        tracker.update(Some(sample(1, false)));
-        let switched = tracker.update(Some(sample(2, true)));
+        tracker.update(Some(sample(1, 1, false)));
+        let switched = tracker.update(Some(sample(2, 2, true)));
         assert!(switched.connected);
         assert!(switched.south_down);
         assert!(!switched.south_pressed);
