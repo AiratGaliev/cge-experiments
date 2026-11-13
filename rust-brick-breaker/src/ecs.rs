@@ -10,6 +10,7 @@ use bevy_ecs::{
     schedule::{IntoScheduleConfigs, ScheduleLabel},
 };
 use bevy_math::Vec2;
+use bevy_tasks::{ComputeTaskPool, TaskPoolBuilder};
 use bevy_time::Time;
 
 use crate::physics::{NativePhysicsSchedule, PhysicsPositionChange, SOLVER_SUB_STEPS};
@@ -116,6 +117,15 @@ pub struct EcsWorld {
 
 impl EcsWorld {
     pub fn new() -> Self {
+        // Avian uses Bevy's global compute pool for parallel collider-tree queries.
+        // The standalone runtime does not install Bevy's TaskPoolPlugin, so initialize
+        // only the pool required by the physics backend.
+        ComputeTaskPool::get_or_init(|| {
+            TaskPoolBuilder::new()
+                .thread_name("Compute Task Pool".to_owned())
+                .build()
+        });
+
         let mut app = App::new();
         app.insert_resource(Time::<()>::default());
         app.insert_resource(Gravity(Vec2::ZERO));
@@ -504,6 +514,7 @@ mod tests {
     #[test]
     fn physics_and_scene_share_one_ecs_world() {
         let mut world = EcsWorld::new();
+        assert!(ComputeTaskPool::try_get().is_some());
         assert!(
             world
                 .app

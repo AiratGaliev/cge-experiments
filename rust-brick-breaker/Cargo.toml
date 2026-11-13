@@ -10,7 +10,8 @@ description = "Scripting-first native 2D runtime using winit, wgpu, Bevy ECS, Av
 anyhow = "=1.0.100"
 avian2d = { version = "=0.8.0", default-features = false, features = ["2d", "parry-f32"] }
 bevy_app = { version = "=0.20.1", default-features = false, features = ["std"] }
-bevy_ecs = { version = "=0.20.1", default-features = false, features = ["std", "debug"] }
+bevy_ecs = { version = "=0.20.1", default-features = false, features = ["std"] }
+bevy_tasks = { version = "=0.20.1", default-features = false, features = ["multi_threaded"] }
 bevy_math = { version = "=0.20.1", default-features = false, features = ["std"] }
 bevy_time = { version = "=0.20.1", default-features = false, features = ["std"] }
 bytemuck = { version = "=1.25.0", features = ["derive"] }
