@@ -40,7 +40,9 @@ Results are machine-specific. Comparisons are meaningful only when the same bina
 | Host API | frame_submit_and_update/{16,64,256} | Zero-copy handoff of frame buffers and one batched read of 16, 64 or 256 transforms |
 | Gameplay | brick_breaker_update | Execute the compiled Brick Breaker TypeScript game update |
 | Box2D | fixed_step/{40,256,1024} | Step a world containing active moving dynamic bodies |
-| Box2D | positions_snapshot/{40,256,1024} | Read body transforms into a reusable positions map |
+| Box2D | positions_snapshot/{40,256,1024} | Copy cached transforms into a reusable positions map |
+| Box2D | positions_cache_borrow/{40,256,1024} | Borrow the current transform cache without traversing it |
+| Box2D + Flecs | box2d_frame_sync/step_and_sync | Step physics and synchronize only changed transforms in sparse and dense scenes |
 | Flecs | draw_rectangles_snapshot/{40,256,1024} | Extract rectangle render data into a reusable vector |
 
 The host API benchmark pre-allocates the JS entity ID array and Float32Array; those allocations are not charged to each measured frame. Frame-state Rust buffers are handed to the host by swapping ownership and are restored after the synchronous QuickJS update. The physics and Flecs snapshot benchmarks likewise reuse output buffers. The Box2D world contains active bodies; this is not an empty-world benchmark.
@@ -82,7 +84,7 @@ Bold reductions were statistically significant at the 0.05 level in the Criterio
 ### Limits and trade-offs
 
 - **Startup cost:** context creation plus source evaluation showed no statistically significant change. Persistent lifecycle references do not provide a demonstrated startup improvement; their benefit is steady-state execution.
-- **Large transform snapshots did not materially improve:** retaining the HashMap allocation does not remove per-body Box2D transform access and map insertion. At 256 bodies no significant improvement was detected; at 1024 bodies Criterion classified the reduction as within its noise threshold. The next useful investigation is a direct contiguous transform extraction path or a packed transform buffer, if the Box2D API permits it without unsafe lifetime assumptions.
+- **Round 1 transform snapshots did not materially improve:** retaining a HashMap allocation did not remove per-body Box2D transform access and map insertion. Round 2 replaces that scan with Box2D body-move events and a persistent transform cache; see the second-round results below.
 - **No FPS claim:** these are CPU microbenchmarks. They do not measure SDL event latency, complete frame scheduling, GPU command submission, present/vsync wait, GPU upload time or end-to-end frame pacing. The reusable wgpu vertex buffer is compile/test checked but has not yet been measured with GPU timestamps or an interactive frame profiler.
 - **No bytecode comparison:** JavaScript source evaluation remains the current load path. qjsc bytecode loading is not included in this optimization round; it would primarily target script packaging and load-time behavior, not presumed frame execution speed.
 
@@ -95,6 +97,69 @@ Bold reductions were statistically significant at the 0.05 level in the Criterio
 - Reuse command vectors, physics position maps, collision scratch collections and ECS render-data vectors.
 - Reuse text-label String capacity when refreshing ECS text render data.
 - Retain the renderer's CPU vertex vector and grow a reusable GPU vertex buffer instead of recreating it every frame.
+
+## Round 2 — Box2D body-move cache and adaptive Flecs synchronization
+
+Round 2 uses the Box2D 3 CompletedStep body_events stream. Every registered body has an initial transform cached in PhysicsWorld; explicit set_transform updates it immediately, and each Box2D body-move event updates only that body's cache entry and emits a dirty transform record. The event stream includes the final transform when a body goes to sleep. A reverse BodyId to entity_id map connects Box2D events to runtime ECS identity.
+
+The main loop now:
+1. Borrows the cached transform map for the synchronous QuickJS update, avoiding a full transform query.
+2. Advances Box2D fixed steps and applies body-move events directly to the transform cache.
+3. Drains dirty transform records and selects incremental or full-query Flecs synchronization based on the number of unique moved entities.
+4. Keeps the previous full positions() / positions_into() and full ECS synchronization APIs for compatibility.
+
+The implementation intentionally does not copy Box2D move events into an intermediate scratch vector and does not coalesce them in PhysicsWorld. For adaptive path selection, EcsWorld reuses a HashSet only when the raw event count could reach the dense threshold; it counts unique entity IDs and stops as soon as half the physics bodies are confirmed moved. This avoids treating repeated events from multiple fixed substeps as distinct bodies.
+
+### End-to-end Box2D to Flecs results
+
+The box2d_frame_sync/step_and_sync benchmark measures the same semantic work before and after. The current path uses incremental entity updates below 50% unique moved bodies and a direct Flecs query at or above that threshold:
+- Before: Box2D fixed step + full transform snapshot of all bodies + full Flecs physics synchronization.
+- After: Box2D fixed step + transform-cache update from body-move events + adaptive incremental/direct-query Flecs synchronization.
+
+All five scenarios were measured with Criterion on the same Windows / Ryzen 5 5600H host, 1 second warm-up, 2 seconds measurement, 30 samples. The round-1 baseline was captured before changing the physics runtime. Times are point estimates; the change column and confidence intervals come from Criterion's sample comparison.
+
+| Scenario | Before | After | Criterion change |
+|---|---:|---:|---:|
+| 40 bodies, 2 moving | 9.051 \u00b5s | 3.873 \u00b5s | **\u221258.01%** (95% CI \u221259.41% to \u221256.60%) |
+| 256 bodies, 2 moving | 32.037 \u00b5s | 2.611 \u00b5s | **\u221292.10%** (95% CI \u221292.29% to \u221291.90%) |
+| 1024 bodies, 2 moving | 180.564 \u00b5s | 2.170 \u00b5s | **\u221298.73%** (95% CI \u221298.80% to \u221298.67%) |
+| 256 bodies, 256 moving | 70.108 \u00b5s | 66.175 \u00b5s | \u22123.01% (95% CI \u22126.34% to +0.34%, p = 0.09; no change detected) |
+| 1024 bodies, 1024 moving | 346.857 \u00b5s | 302.922 \u00b5s | **\u221211.97%** (95% CI \u221215.55% to \u22128.27%) |
+
+The large sparse-scene gains are the important result for Brick Breaker: the workload has a small moving set (ball and paddle) among many static bricks. With adaptive synchronization, the dense 256-body case is statistically unchanged, while the dense 1024-body case improves by about 12%. The dense path performs a direct Flecs query against the already-populated transform cache; it does not invoke the legacy per-entity Mutex-backed system.
+
+### Transform cache microbenchmarks
+
+positions_snapshot still returns a complete map, but copies from the persistent cache rather than querying every Box2D body through the FFI. positions_cache_borrow only measures returning a borrowed reference; it does not traverse the map and must not be interpreted as the cost of reading every transform.
+
+| Case | Before | After | Criterion change |
+|---|---:|---:|---:|
+| Snapshot, 40 bodies | 3.167 µs | 0.558 µs | **−82.19%** (95% CI −82.70% to −81.66%) |
+| Snapshot, 256 bodies | 20.442 µs | 3.574 µs | **−82.63%** (95% CI −83.00% to −82.26%) |
+| Snapshot, 1024 bodies | 89.093 µs | 15.385 µs | **−83.11%** (95% CI −83.60% to −82.46%) |
+| Borrow cache, 40 / 256 / 1024 | — | about 0.52 ns | Separate access-cost benchmark; no historical pre-cache equivalent |
+
+The isolated fixed_step diagnostic includes additional work in the new implementation: body-move event enumeration, transform-cache updates and dirty-record publication. It is not an apples-to-apples measurement of the Box2D solver alone. The diagnostic result is:
+
+| Bodies | Before | After | Criterion change |
+|---|---:|---:|---:|
+| 40 | 5.213 µs | 8.716 µs | +59.72% (95% CI +51.45% to +67.28%) |
+| 256 | 22.673 µs | 48.683 µs | +111.22% (95% CI +99.81% to +124.18%) |
+| 1024 | 90.856 µs | 199.453 µs | +121.05% (95% CI +113.12% to +128.33%) |
+
+This increase is the cost of maintaining a complete transform cache from the move-event stream. The end-to-end step_and_sync comparison includes the old full-snapshot/full-ECS work and is the correct measure of runtime impact. Sparse scenes improve dramatically; fully moving scenes are neutral to modestly slower, depending on size.
+
+### Correctness coverage
+
+New tests cover:
+- Moving dynamic and kinematic bodies update the cache and emit dirty events while static bodies remain cached without move events.
+- The final body-move event preserves the transform when a body goes to sleep.
+- Explicit set_transform updates the cache immediately.
+- Destroying a body removes its cache entry and queued transform updates.
+- The full snapshot compatibility API reads from the cache and preserves caller-owned map capacity.
+- Flecs applies sparse changed transforms directly, switches to a full query at 50% unique moved entities, and safely ignores already-destroyed entities on the incremental path.
+- Existing contact, lifecycle, Brick Breaker and zero-copy scripting tests remain in the full suite.
+The adaptive-path regression test covers repeated move records for one entity, the sparse update path, the 50% unique-entity threshold, and the empty-change fast path. Benchmark scenarios use one fixed step per measured iteration; the unit test separately verifies that duplicate records do not inflate the unique-entity count.
 
 ## Next profiling targets
 

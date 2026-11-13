@@ -14,7 +14,7 @@ use sdl3::{
 use native_brick_breaker::{
     audio::Audio,
     ecs::EcsWorld,
-    physics::{PhysicsPositions, PhysicsWorld},
+    physics::PhysicsWorld,
     render::Renderer,
     scripting::{RuntimeCommand, ScriptEngine},
 };
@@ -93,8 +93,7 @@ fn run_runtime(sdl: sdl3::Sdl, window: Window, script_path: &std::path::Path) ->
     scene.draw_rectangles_into(&mut rectangles);
     scene.draw_circles_into(&mut circles);
     scene.draw_text_into(&mut labels);
-    let mut positions = PhysicsPositions::new();
-    physics.positions_into(&mut positions)?;
+
     println!("GPU adapter: {}", renderer.adapter_name());
     println!("Game script: {}", script_path.display());
     println!(
@@ -103,7 +102,7 @@ fn run_runtime(sdl: sdl3::Sdl, window: Window, script_path: &std::path::Path) ->
         rectangles.len(),
         circles.len(),
         labels.len(),
-        positions.len()
+        physics.positions_ref().len()
     );
     println!("Native runtime initialized. Press Escape to quit.");
 
@@ -111,6 +110,7 @@ fn run_runtime(sdl: sdl3::Sdl, window: Window, script_path: &std::path::Path) ->
     let mut last_frame = Instant::now();
     let mut accumulator = 0.0_f32;
     let mut pending_collisions = Vec::new();
+    let mut moved_positions = Vec::new();
 
     'running: loop {
         for event in event_pump.poll_iter() {
@@ -161,15 +161,12 @@ fn run_runtime(sdl: sdl3::Sdl, window: Window, script_path: &std::path::Path) ->
         let frame_delta = frame_delta.min(MAX_FRAME_DELTA);
         accumulator = (accumulator + frame_delta).min(FIXED_STEP * MAX_STEPS_PER_FRAME as f32);
 
-        physics
-            .positions_into(&mut positions)
-            .context("read native physics transforms before game update")?;
         script
             .update_frame(
                 frame_delta,
                 &mut input.down,
                 &mut input.pressed,
-                &mut positions,
+                physics.positions_mut(),
                 &mut pending_collisions,
             )
             .context("execute TypeScript game update")?;
@@ -188,10 +185,10 @@ fn run_runtime(sdl: sdl3::Sdl, window: Window, script_path: &std::path::Path) ->
             step_count += 1;
         }
 
-        physics
-            .positions_into(&mut positions)
-            .context("read Box2D transforms for Flecs synchronization")?;
-        scene.synchronize_physics(&positions);
+        physics.drain_position_changes_into(&mut moved_positions);
+        scene
+            .synchronize_physics_adaptive(&moved_positions, physics.positions_ref())
+            .context("synchronize Box2D transforms into Flecs")?;
 
         scene.draw_rectangles_into(&mut rectangles);
         scene.draw_circles_into(&mut circles);

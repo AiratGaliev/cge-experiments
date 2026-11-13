@@ -171,7 +171,7 @@ fn bench_physics(c: &mut Criterion) {
     for body_count in [40_u32, 256, 1024] {
         let mut world = make_physics_world(body_count);
         let mut collisions = Vec::new();
-        let mut positions = HashMap::with_capacity(body_count as usize);
+        let mut position_changes = Vec::new();
         group.throughput(Throughput::Elements(u64::from(body_count)));
         group.bench_with_input(
             BenchmarkId::new("fixed_step", body_count),
@@ -180,10 +180,13 @@ fn bench_physics(c: &mut Criterion) {
                 b.iter(|| {
                     collisions.clear();
                     world.step_into(FIXED_STEP, &mut collisions).unwrap();
+                    world.drain_position_changes_into(&mut position_changes);
                     black_box(&collisions);
+                    black_box(&position_changes);
                 })
             },
         );
+        let mut positions = HashMap::with_capacity(body_count as usize);
         group.bench_with_input(
             BenchmarkId::new("positions_snapshot", body_count),
             &body_count,
@@ -193,6 +196,11 @@ fn bench_physics(c: &mut Criterion) {
                     black_box(&positions);
                 })
             },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("positions_cache_borrow", body_count),
+            &body_count,
+            |b, _| b.iter(|| black_box(world.positions_ref())),
         );
     }
 }
@@ -232,5 +240,77 @@ fn bench_ecs(c: &mut Criterion) {
     }
 }
 
-criterion_group!(runtime_benches, bench_script, bench_physics, bench_ecs);
+fn make_physics_scene(body_count: u32, moving_body_count: u32) -> (PhysicsWorld, EcsWorld) {
+    let mut physics = PhysicsWorld::new([0.0, 0.0]).unwrap();
+    let mut scene = EcsWorld::new();
+    let material = PhysicsMaterial {
+        density: 1.0,
+        friction: 0.0,
+        restitution: 0.0,
+        gravity_scale: 0.0,
+        bullet: false,
+    };
+
+    for entity_id in 1..=body_count {
+        let grid_index = entity_id - 1;
+        let position = [
+            (grid_index % 32) as f32 * 1.5,
+            (grid_index / 32) as f32 * 1.5,
+        ];
+        scene
+            .create_rectangle(entity_id, position[0], position[1], 0.2, 0.2, COLOR)
+            .unwrap();
+        scene.attach_physics(entity_id).unwrap();
+
+        physics
+            .create_circle(entity_id, position, 0.1, RigidBodyKind::Dynamic, material)
+            .unwrap();
+        if entity_id <= moving_body_count {
+            physics.set_linear_velocity(entity_id, [0.4, 0.2]).unwrap();
+        }
+    }
+
+    (physics, scene)
+}
+
+fn bench_physics_frame_sync(c: &mut Criterion) {
+    let mut group = c.benchmark_group("box2d_frame_sync");
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
+    group.sample_size(30);
+
+    for (body_count, moving_body_count) in [
+        (40_u32, 2_u32),
+        (256, 2),
+        (1024, 2),
+        (256, 256),
+        (1024, 1024),
+    ] {
+        let (mut physics, mut scene) = make_physics_scene(body_count, moving_body_count);
+        let mut collisions = Vec::new();
+        let mut position_changes = Vec::new();
+        let id = format!("{body_count}_bodies_{moving_body_count}_moving");
+
+        group.throughput(Throughput::Elements(u64::from(body_count)));
+        group.bench_function(BenchmarkId::new("step_and_sync", id), |b| {
+            b.iter(|| {
+                collisions.clear();
+                physics.step_into(FIXED_STEP, &mut collisions).unwrap();
+                physics.drain_position_changes_into(&mut position_changes);
+                scene
+                    .synchronize_physics_adaptive(&position_changes, physics.positions_ref())
+                    .unwrap();
+                black_box(scene.entity_count());
+                black_box(&position_changes);
+            });
+        });
+    }
+}
+criterion_group!(
+    runtime_benches,
+    bench_script,
+    bench_physics,
+    bench_ecs,
+    bench_physics_frame_sync
+);
 criterion_main!(runtime_benches);

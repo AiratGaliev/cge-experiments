@@ -1,9 +1,10 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
-use anyhow::{Result, bail};
+use crate::physics::PhysicsPositionChange;
+use anyhow::{Context as _, Result, bail};
 use flecs_ecs::prelude::*;
 
 #[derive(Component, Clone, Copy)]
@@ -72,6 +73,7 @@ pub struct EcsWorld {
     world: World,
     native_entities: HashMap<u32, u64>,
     physics_positions: Arc<Mutex<PositionMap>>,
+    physics_sync_candidates: HashSet<u32>,
     pending_transforms: Arc<Mutex<PositionMap>>,
     pending_text: Arc<Mutex<HashMap<u32, String>>>,
 }
@@ -132,6 +134,7 @@ impl EcsWorld {
             world,
             native_entities: HashMap::new(),
             physics_positions,
+            physics_sync_candidates: HashSet::new(),
             pending_transforms,
             pending_text,
         }
@@ -314,6 +317,71 @@ impl EcsWorld {
             .clear();
     }
 
+    /// Applies only Box2D transforms that changed since the previous synchronization.
+    pub fn synchronize_physics_changes(&mut self, changes: &[PhysicsPositionChange]) -> Result<()> {
+        for change in changes {
+            let Some(&native_id) = self.native_entities.get(&change.entity_id) else {
+                continue;
+            };
+
+            self.world
+                .entity_from_id(native_id)
+                .try_get::<&mut Transform>(|transform| {
+                    transform.x = change.position[0];
+                    transform.y = change.position[1];
+                })
+                .with_context(|| {
+                    format!(
+                        "physics-linked ECS entity {} has no Transform component",
+                        change.entity_id
+                    )
+                })?;
+        }
+        Ok(())
+    }
+    /// Uses incremental entity updates for sparse movement and a direct Flecs query
+    /// when the number of move events reaches half of the physics-body count.
+    ///
+    /// The dense path reads the already-maintained transform cache directly. It does
+    /// not step the world or take the legacy physics snapshot mutex per entity.
+    pub fn synchronize_physics_adaptive(
+        &mut self,
+        changes: &[PhysicsPositionChange],
+        positions: &PositionMap,
+    ) -> Result<()> {
+        if changes.is_empty() || positions.is_empty() {
+            return Ok(());
+        }
+
+        let use_full_query = if changes.len().saturating_mul(2) < positions.len() {
+            false
+        } else {
+            self.physics_sync_candidates.clear();
+            for change in changes {
+                self.physics_sync_candidates.insert(change.entity_id);
+                if self.physics_sync_candidates.len().saturating_mul(2) >= positions.len() {
+                    break;
+                }
+            }
+            let dense = self.physics_sync_candidates.len().saturating_mul(2) >= positions.len();
+            self.physics_sync_candidates.clear();
+            dense
+        };
+
+        if use_full_query {
+            self.world
+                .new_query::<(&mut Transform, &PhysicsLink)>()
+                .each(|(transform, link)| {
+                    if let Some(position) = positions.get(&link.entity_id) {
+                        transform.x = position[0];
+                        transform.y = position[1];
+                    }
+                });
+            Ok(())
+        } else {
+            self.synchronize_physics_changes(changes)
+        }
+    }
     pub fn synchronize_physics(&mut self, positions: &PositionMap) {
         {
             let mut snapshot = self
@@ -460,6 +528,133 @@ mod tests {
         assert_eq!(world.draw_rectangles()[0].y, -2.0);
     }
 
+    #[test]
+    fn adaptive_physics_sync_uses_sparse_updates_and_dense_query() {
+        let mut world = EcsWorld::new();
+        for entity_id in 1..=4 {
+            world
+                .create_rectangle(
+                    entity_id,
+                    entity_id as f32,
+                    entity_id as f32,
+                    1.0,
+                    1.0,
+                    [1.0; 4],
+                )
+                .unwrap();
+            world.attach_physics(entity_id).unwrap();
+        }
+
+        let positions = PositionMap::from([
+            (1, [10.0, 11.0]),
+            (2, [20.0, 21.0]),
+            (3, [30.0, 31.0]),
+            (4, [40.0, 41.0]),
+        ]);
+
+        // Repeated substep events for one body still count as one moved entity.
+        world
+            .synchronize_physics_adaptive(
+                &[
+                    PhysicsPositionChange {
+                        entity_id: 1,
+                        position: [10.0, 11.0],
+                    },
+                    PhysicsPositionChange {
+                        entity_id: 1,
+                        position: [10.0, 11.0],
+                    },
+                    PhysicsPositionChange {
+                        entity_id: 1,
+                        position: [10.0, 11.0],
+                    },
+                ],
+                &positions,
+            )
+            .unwrap();
+
+        let sparse_rectangles = world.draw_rectangles();
+        assert_eq!(
+            sparse_rectangles
+                .iter()
+                .map(|item| (item.x, item.y))
+                .collect::<Vec<_>>(),
+            vec![(10.0, 11.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0)]
+        );
+
+        // Two changed bodies out of four take the full query path.
+        world
+            .synchronize_physics_adaptive(
+                &[
+                    PhysicsPositionChange {
+                        entity_id: 1,
+                        position: [10.0, 11.0],
+                    },
+                    PhysicsPositionChange {
+                        entity_id: 2,
+                        position: [20.0, 21.0],
+                    },
+                ],
+                &positions,
+            )
+            .unwrap();
+
+        let dense_rectangles = world.draw_rectangles();
+        assert_eq!(
+            dense_rectangles
+                .iter()
+                .map(|item| (item.x, item.y))
+                .collect::<Vec<_>>(),
+            vec![(10.0, 11.0), (20.0, 21.0), (30.0, 31.0), (40.0, 41.0)]
+        );
+
+        // No move events means no synchronization work, even if the cached map
+        // contains transforms that differ from the ECS state.
+        world
+            .synchronize_physics_adaptive(&[], &PositionMap::from([(1, [99.0, 99.0])]))
+            .unwrap();
+        assert_eq!(world.draw_rectangles()[0].x, 10.0);
+    }
+    #[test]
+    fn flecs_applies_only_incremental_physics_transform_changes() {
+        let mut world = EcsWorld::new();
+        world
+            .create_rectangle(1, 0.0, 0.0, 1.0, 1.0, [1.0; 4])
+            .unwrap();
+        world
+            .create_rectangle(2, 5.0, 6.0, 1.0, 1.0, [1.0; 4])
+            .unwrap();
+        world.attach_physics(1).unwrap();
+        world.attach_physics(2).unwrap();
+
+        world
+            .synchronize_physics_changes(&[
+                PhysicsPositionChange {
+                    entity_id: 1,
+                    position: [2.0, 3.0],
+                },
+                PhysicsPositionChange {
+                    entity_id: 2,
+                    position: [7.0, 8.0],
+                },
+            ])
+            .unwrap();
+
+        let rectangles = world.draw_rectangles();
+        let first = rectangles.iter().find(|item| item.x == 2.0).unwrap();
+        let second = rectangles.iter().find(|item| item.x == 7.0).unwrap();
+        assert_eq!((first.x, first.y), (2.0, 3.0));
+        assert_eq!((second.x, second.y), (7.0, 8.0));
+
+        world.destroy_entity(2).unwrap();
+        world
+            .synchronize_physics_changes(&[PhysicsPositionChange {
+                entity_id: 2,
+                position: [90.0, 90.0],
+            }])
+            .unwrap();
+        assert_eq!(world.draw_rectangles().len(), 1);
+    }
     #[test]
     fn destroying_an_entity_releases_its_flecs_record() {
         let mut world = EcsWorld::new();
