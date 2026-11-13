@@ -25,4 +25,4 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends             build-essential clang cmake ninja-build pkg-config libvulkan-dev             libasound2-dev libpulse-dev libpipewire-0.3-dev libudev-dev             libdbus-1-dev libwayland-dev libxkbcommon-dev             libx11-dev libxext-dev libxfixes-dev libxi-dev libxcursor-dev             libxrandr-dev libxss-dev libxrender-dev             libegl1-mesa-dev libgl1-mesa-dev libdrm-dev libgbm-dev
       - name: Run focused Rust tests with Bevy system diagnostics
-        run: cargo test --lib --locked -- --nocapture
+        run: cargo test --lib -- --nocapture
