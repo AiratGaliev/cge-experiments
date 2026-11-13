@@ -1,0 +1,68 @@
+name: COD-116 isolated performance comparison
+
+on:
+  push:
+    branches:
+      - perf/cod-116-same-runner
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout temporary benchmark branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install native build prerequisites for both revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential clang cmake ninja-build pkg-config libclang-dev libvulkan-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev libudev-dev \
+            libdbus-1-dev libwayland-dev libxkbcommon-dev \
+            libx11-dev libxext-dev libxfixes-dev libxi-dev libxcursor-dev \
+            libxrandr-dev libxss-dev libxrender-dev libxtst-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libdrm-dev libgbm-dev
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - name: Record benchmark host and configure shared target cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc -Vv
+          uname -a
+          lscpu
+          mkdir -p "$RUNNER_TEMP/cod-116-perf"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/cod-116-cargo-target" >> "$GITHUB_ENV"
+      - name: Benchmark pre-migration Box2D and Flecs
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach 46a3a5befba26dbec7cb22079aebde58a8cc595c
+          cd rust-brick-breaker
+          cargo bench --locked --bench runtime -- frame_sync --noplot 2>&1 | tee "$RUNNER_TEMP/cod-116-perf/before-frame-sync.log"
+          cargo bench --locked --bench runtime -- fixed_step --noplot 2>&1 | tee "$RUNNER_TEMP/cod-116-perf/before-fixed-step.log"
+          cargo bench --locked --bench runtime -- draw_rectangles_snapshot --noplot 2>&1 | tee "$RUNNER_TEMP/cod-116-perf/before-ecs-extract.log"
+      - name: Benchmark migrated Avian and Bevy ECS
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach 635ee2d5a2cb4878095e86bfe8d27981163b5068
+          cd rust-brick-breaker
+          cargo bench --locked --bench runtime -- frame_sync --noplot 2>&1 | tee "$RUNNER_TEMP/cod-116-perf/after-frame-sync.log"
+          cargo bench --locked --bench runtime -- fixed_step --noplot 2>&1 | tee "$RUNNER_TEMP/cod-116-perf/after-fixed-step.log"
+          cargo bench --locked --bench runtime -- draw_rectangles_snapshot --noplot 2>&1 | tee "$RUNNER_TEMP/cod-116-perf/after-ecs-extract.log"
+      - name: Upload raw Criterion output
+        uses: actions/upload-artifact@v4
+        with:
+          name: cod-116-criterion-comparison
+          path: ${{ runner.temp }}/cod-116-perf/*.log
+          if-no-files-found: error
