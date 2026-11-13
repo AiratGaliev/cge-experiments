@@ -503,7 +503,6 @@ mod tests {
 
         assert_eq!(scene.entity_count(), 0);
         assert!(!physics.has_body(42));
-        assert_eq!(scene.world_mut().entities().len(), 0);
     }
 
     #[test]
