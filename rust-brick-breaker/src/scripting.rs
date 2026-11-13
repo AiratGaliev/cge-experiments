@@ -1,113 +1,545 @@
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Context as _, Result};
 use crossbeam_queue::ArrayQueue;
 use rquickjs::{Context, Function, Object, Runtime};
 
-use crate::audio::enqueue_sound;
+use crate::{
+    audio::enqueue_tone,
+    physics::{CollisionEvent, PhysicsMaterial, RigidBodyKind},
+};
 
-const GAME_SCRIPT: &str = include_str!("../assets/game.js");
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GameStatus {
-    Ready,
-    Playing,
-    Victory,
-    GameOver,
+#[derive(Debug)]
+pub enum RuntimeCommand {
+    CreateRectangle {
+        entity_id: u32,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        color: [f32; 4],
+    },
+    CreateCircle {
+        entity_id: u32,
+        x: f32,
+        y: f32,
+        radius: f32,
+        color: [f32; 4],
+    },
+    CreateText {
+        entity_id: u32,
+        value: String,
+        x: f32,
+        y: f32,
+        scale: f32,
+        color: [f32; 4],
+    },
+    SetPosition {
+        entity_id: u32,
+        x: f32,
+        y: f32,
+    },
+    SetText {
+        entity_id: u32,
+        value: String,
+    },
+    DestroyEntity {
+        entity_id: u32,
+    },
+    CreateBoxBody {
+        entity_id: u32,
+        position: [f32; 2],
+        size: [f32; 2],
+        body_type: RigidBodyKind,
+        material: PhysicsMaterial,
+    },
+    CreateCircleBody {
+        entity_id: u32,
+        position: [f32; 2],
+        radius: f32,
+        body_type: RigidBodyKind,
+        material: PhysicsMaterial,
+    },
+    SetLinearVelocity {
+        entity_id: u32,
+        velocity: [f32; 2],
+    },
+    SetBodyPosition {
+        entity_id: u32,
+        position: [f32; 2],
+    },
+    DestroyBody {
+        entity_id: u32,
+    },
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct GameSnapshot {
-    pub score: u32,
-    pub lives: u32,
-    pub status: GameStatus,
+#[derive(Default)]
+struct HostFrame {
+    delta_seconds: f32,
+    keys_down: HashSet<String>,
+    keys_pressed: HashSet<String>,
+    positions: HashMap<u32, [f32; 2]>,
+    collisions: Vec<CollisionEvent>,
+}
+
+#[derive(Default)]
+struct HostState {
+    next_entity_id: u32,
+    commands: Vec<RuntimeCommand>,
+    frame: HostFrame,
 }
 
 pub struct ScriptEngine {
     context: Context,
     _runtime: Runtime,
+    host: Arc<Mutex<HostState>>,
 }
 
 impl ScriptEngine {
-    pub fn new(audio_queue: Arc<ArrayQueue<f32>>) -> Result<Self> {
+    pub fn new(script_path: &Path, audio_queue: Arc<ArrayQueue<f32>>) -> Result<Self> {
+        let source = fs::read_to_string(script_path)
+            .with_context(|| format!("read game script {}", script_path.display()))?;
+        Self::from_source(&source, audio_queue)
+    }
+
+    pub fn from_source(source: &str, audio_queue: Arc<ArrayQueue<f32>>) -> Result<Self> {
         let runtime = Runtime::new().context("create QuickJS-NG runtime")?;
         let context = Context::full(&runtime).context("create QuickJS-NG context")?;
+        let host = Arc::new(Mutex::new(HostState {
+            next_entity_id: 1,
+            ..HostState::default()
+        }));
 
         context
             .with(|ctx| -> rquickjs::Result<()> {
-                let host = Object::new(ctx.clone())?;
-                let sound_queue = Arc::clone(&audio_queue);
-                host.set(
-                    "playSound",
-                    Function::new(ctx.clone(), move |name: String| {
-                        enqueue_sound(&sound_queue, &name);
-                    })?,
-                )?;
-                ctx.globals().set("host", host)?;
-                ctx.eval::<(), _>(GAME_SCRIPT)?;
+                let engine = Object::new(ctx.clone())?;
+
+                let entities = Object::new(ctx.clone())?;
+                {
+                    let state = Arc::clone(&host);
+                    entities.set(
+                        "createRectangle",
+                        Function::new(
+                            ctx.clone(),
+                            move |config: Object<'_>| -> rquickjs::Result<u32> {
+                                let x = config.get::<_, f32>("x")?;
+                                let y = config.get::<_, f32>("y")?;
+                                let width = config.get::<_, f32>("width")?;
+                                let height = config.get::<_, f32>("height")?;
+                                let color = [
+                                    config.get::<_, f32>("r")?,
+                                    config.get::<_, f32>("g")?,
+                                    config.get::<_, f32>("b")?,
+                                    config.get::<_, f32>("a")?,
+                                ];
+                                let mut state = lock(&state);
+                                let entity_id = allocate_entity_id(&mut state)?;
+                                state.commands.push(RuntimeCommand::CreateRectangle {
+                                    entity_id,
+                                    x,
+                                    y,
+                                    width,
+                                    height,
+                                    color,
+                                });
+                                Ok(entity_id)
+                            },
+                        )?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    entities.set(
+                        "createCircle",
+                        Function::new(
+                            ctx.clone(),
+                            move |config: Object<'_>| -> rquickjs::Result<u32> {
+                                let x = config.get::<_, f32>("x")?;
+                                let y = config.get::<_, f32>("y")?;
+                                let radius = config.get::<_, f32>("radius")?;
+                                let color = [
+                                    config.get::<_, f32>("r")?,
+                                    config.get::<_, f32>("g")?,
+                                    config.get::<_, f32>("b")?,
+                                    config.get::<_, f32>("a")?,
+                                ];
+                                let mut state = lock(&state);
+                                let entity_id = allocate_entity_id(&mut state)?;
+                                state.commands.push(RuntimeCommand::CreateCircle {
+                                    entity_id,
+                                    x,
+                                    y,
+                                    radius,
+                                    color,
+                                });
+                                Ok(entity_id)
+                            },
+                        )?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    entities.set(
+                        "createText",
+                        Function::new(
+                            ctx.clone(),
+                            move |config: Object<'_>| -> rquickjs::Result<u32> {
+                                let value = config.get::<_, String>("value")?;
+                                let x = config.get::<_, f32>("x")?;
+                                let y = config.get::<_, f32>("y")?;
+                                let scale = config.get::<_, f32>("scale")?;
+                                let color = [
+                                    config.get::<_, f32>("r")?,
+                                    config.get::<_, f32>("g")?,
+                                    config.get::<_, f32>("b")?,
+                                    config.get::<_, f32>("a")?,
+                                ];
+                                let mut state = lock(&state);
+                                let entity_id = allocate_entity_id(&mut state)?;
+                                state.commands.push(RuntimeCommand::CreateText {
+                                    entity_id,
+                                    value,
+                                    x,
+                                    y,
+                                    scale,
+                                    color,
+                                });
+                                Ok(entity_id)
+                            },
+                        )?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    entities.set(
+                        "setPosition",
+                        Function::new(ctx.clone(), move |entity_id: u32, x: f32, y: f32| {
+                            lock(&state).commands.push(RuntimeCommand::SetPosition {
+                                entity_id,
+                                x,
+                                y,
+                            });
+                        })?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    entities.set(
+                        "setText",
+                        Function::new(ctx.clone(), move |entity_id: u32, value: String| {
+                            lock(&state)
+                                .commands
+                                .push(RuntimeCommand::SetText { entity_id, value });
+                        })?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    entities.set(
+                        "destroy",
+                        Function::new(ctx.clone(), move |entity_id: u32| {
+                            lock(&state)
+                                .commands
+                                .push(RuntimeCommand::DestroyEntity { entity_id });
+                        })?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    entities.set(
+                        "getPositionX",
+                        Function::new(ctx.clone(), move |entity_id: u32| {
+                            lock(&state)
+                                .frame
+                                .positions
+                                .get(&entity_id)
+                                .map(|position| position[0])
+                        })?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    entities.set(
+                        "getPositionY",
+                        Function::new(ctx.clone(), move |entity_id: u32| {
+                            lock(&state)
+                                .frame
+                                .positions
+                                .get(&entity_id)
+                                .map(|position| position[1])
+                        })?,
+                    )?;
+                }
+                engine.set("entities", entities)?;
+
+                let physics = Object::new(ctx.clone())?;
+                {
+                    let state = Arc::clone(&host);
+                    physics.set(
+                        "createBox",
+                        Function::new(
+                            ctx.clone(),
+                            move |config: Object<'_>| -> rquickjs::Result<()> {
+                                let entity_id = config.get::<_, u32>("entityId")?;
+                                let x = config.get::<_, f32>("x")?;
+                                let y = config.get::<_, f32>("y")?;
+                                let width = config.get::<_, f32>("width")?;
+                                let height = config.get::<_, f32>("height")?;
+                                let body_type =
+                                    parse_body_type(&config.get::<_, String>("bodyType")?)?;
+                                let material = PhysicsMaterial {
+                                    density: config.get::<_, f32>("density")?,
+                                    friction: config.get::<_, f32>("friction")?,
+                                    restitution: config.get::<_, f32>("restitution")?,
+                                    gravity_scale: config.get::<_, f32>("gravityScale")?,
+                                    bullet: config.get::<_, bool>("bullet")?,
+                                };
+                                lock(&state).commands.push(RuntimeCommand::CreateBoxBody {
+                                    entity_id,
+                                    position: [x, y],
+                                    size: [width, height],
+                                    body_type,
+                                    material,
+                                });
+                                Ok(())
+                            },
+                        )?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    physics.set(
+                        "createCircle",
+                        Function::new(
+                            ctx.clone(),
+                            move |config: Object<'_>| -> rquickjs::Result<()> {
+                                let entity_id = config.get::<_, u32>("entityId")?;
+                                let x = config.get::<_, f32>("x")?;
+                                let y = config.get::<_, f32>("y")?;
+                                let radius = config.get::<_, f32>("radius")?;
+                                let body_type =
+                                    parse_body_type(&config.get::<_, String>("bodyType")?)?;
+                                let material = PhysicsMaterial {
+                                    density: config.get::<_, f32>("density")?,
+                                    friction: config.get::<_, f32>("friction")?,
+                                    restitution: config.get::<_, f32>("restitution")?,
+                                    gravity_scale: config.get::<_, f32>("gravityScale")?,
+                                    bullet: config.get::<_, bool>("bullet")?,
+                                };
+                                lock(&state)
+                                    .commands
+                                    .push(RuntimeCommand::CreateCircleBody {
+                                        entity_id,
+                                        position: [x, y],
+                                        radius,
+                                        body_type,
+                                        material,
+                                    });
+                                Ok(())
+                            },
+                        )?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    physics.set(
+                        "setLinearVelocity",
+                        Function::new(ctx.clone(), move |entity_id: u32, x: f32, y: f32| {
+                            lock(&state)
+                                .commands
+                                .push(RuntimeCommand::SetLinearVelocity {
+                                    entity_id,
+                                    velocity: [x, y],
+                                });
+                        })?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    physics.set(
+                        "setPosition",
+                        Function::new(ctx.clone(), move |entity_id: u32, x: f32, y: f32| {
+                            lock(&state).commands.push(RuntimeCommand::SetBodyPosition {
+                                entity_id,
+                                position: [x, y],
+                            });
+                        })?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    physics.set(
+                        "destroyBody",
+                        Function::new(ctx.clone(), move |entity_id: u32| {
+                            lock(&state)
+                                .commands
+                                .push(RuntimeCommand::DestroyBody { entity_id });
+                        })?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    physics.set(
+                        "collisionCount",
+                        Function::new(ctx.clone(), move || {
+                            lock(&state).frame.collisions.len() as u32
+                        })?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    physics.set(
+                        "collisionEntityA",
+                        Function::new(ctx.clone(), move |index: u32| {
+                            lock(&state)
+                                .frame
+                                .collisions
+                                .get(index as usize)
+                                .map(|event| event.entity_a)
+                        })?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    physics.set(
+                        "collisionEntityB",
+                        Function::new(ctx.clone(), move |index: u32| {
+                            lock(&state)
+                                .frame
+                                .collisions
+                                .get(index as usize)
+                                .map(|event| event.entity_b)
+                        })?,
+                    )?;
+                }
+                engine.set("physics", physics)?;
+
+                let input = Object::new(ctx.clone())?;
+                {
+                    let state = Arc::clone(&host);
+                    input.set(
+                        "isDown",
+                        Function::new(ctx.clone(), move |key: String| {
+                            lock(&state).frame.keys_down.contains(&key)
+                        })?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    input.set(
+                        "wasPressed",
+                        Function::new(ctx.clone(), move |key: String| {
+                            lock(&state).frame.keys_pressed.contains(&key)
+                        })?,
+                    )?;
+                }
+                engine.set("input", input)?;
+
+                let time = Object::new(ctx.clone())?;
+                {
+                    let state = Arc::clone(&host);
+                    time.set(
+                        "deltaSeconds",
+                        Function::new(ctx.clone(), move || lock(&state).frame.delta_seconds)?,
+                    )?;
+                }
+                engine.set("time", time)?;
+
+                let audio = Object::new(ctx.clone())?;
+                {
+                    let queue = Arc::clone(&audio_queue);
+                    audio.set(
+                        "playTone",
+                        Function::new(
+                            ctx.clone(),
+                            move |frequency: f32, duration_seconds: f32, volume: f32| {
+                                enqueue_tone(&queue, frequency, duration_seconds, volume)
+                            },
+                        )?,
+                    )?;
+                }
+                engine.set("audio", audio)?;
+
+                ctx.globals().set("engine", engine)?;
+                ctx.eval::<(), _>(source)?;
                 Ok(())
             })
-            .context("install typed Rust host API and evaluate compiled TypeScript")?;
+            .context("install native engine API and evaluate TypeScript output")?;
 
         Ok(Self {
             context,
             _runtime: runtime,
+            host,
         })
     }
 
-    pub fn launch(&self) -> Result<GameSnapshot> {
-        self.evaluate("game.onLaunched()")
+    pub fn initialize(&self) -> Result<()> {
+        self.call_hook("initialize")
     }
 
-    pub fn bounced(&self) -> Result<GameSnapshot> {
-        self.evaluate("game.onBounced()")
+    pub fn update(&self) -> Result<()> {
+        self.call_hook("update")
     }
 
-    pub fn brick_destroyed(&self, points: u32, remaining: usize) -> Result<GameSnapshot> {
-        self.evaluate(&format!("game.onBrickDestroyed({points}, {remaining})"))
+    pub fn shutdown(&self) -> Result<()> {
+        self.call_hook("shutdown")
     }
 
-    pub fn ball_lost(&self) -> Result<GameSnapshot> {
-        self.evaluate("game.onBallLost()")
-    }
-
-    pub fn restart(&self) -> Result<GameSnapshot> {
-        self.evaluate("game.restart()")
-    }
-
-    pub fn snapshot(&self) -> Result<GameSnapshot> {
-        self.read_snapshot()
-    }
-
-    fn evaluate(&self, expression: &str) -> Result<GameSnapshot> {
-        self.context.with(|ctx| -> anyhow::Result<GameSnapshot> {
-            ctx.eval::<(), _>(expression)
-                .context("execute TypeScript game rule in QuickJS-NG")?;
-            read_snapshot(ctx).context("read QuickJS game state")
+    fn call_hook(&self, hook: &str) -> Result<()> {
+        let source = format!(
+            "if (globalThis.game && typeof game.{hook} === 'function') game.{hook}(engine);"
+        );
+        self.context.with(|ctx| -> anyhow::Result<()> {
+            ctx.eval::<(), _>(source.as_str())
+                .with_context(|| format!("execute game.{hook}() in QuickJS-NG"))?;
+            Ok(())
         })
     }
 
-    fn read_snapshot(&self) -> Result<GameSnapshot> {
-        self.context.with(read_snapshot)
+    pub fn set_frame(
+        &self,
+        delta_seconds: f32,
+        keys_down: HashSet<String>,
+        keys_pressed: HashSet<String>,
+        positions: HashMap<u32, [f32; 2]>,
+        collisions: Vec<CollisionEvent>,
+    ) {
+        let mut state = lock(&self.host);
+        state.frame.delta_seconds = delta_seconds;
+        state.frame.keys_down = keys_down;
+        state.frame.keys_pressed = keys_pressed;
+        state.frame.positions = positions;
+        state.frame.collisions = collisions;
+    }
+
+    pub fn drain_commands(&self) -> Vec<RuntimeCommand> {
+        std::mem::take(&mut lock(&self.host).commands)
     }
 }
 
-fn read_snapshot(ctx: rquickjs::Ctx<'_>) -> Result<GameSnapshot> {
-    let snapshot: Object = ctx
-        .eval("game.snapshot()")
-        .context("call game.snapshot()")?;
-    let status = match snapshot.get::<_, String>("status")?.as_str() {
-        "ready" => GameStatus::Ready,
-        "playing" => GameStatus::Playing,
-        "victory" => GameStatus::Victory,
-        "game_over" => GameStatus::GameOver,
-        value => anyhow::bail!("QuickJS returned unknown game status: {value}"),
-    };
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
-    Ok(GameSnapshot {
-        score: snapshot.get("score")?,
-        lives: snapshot.get("lives")?,
-        status,
+fn allocate_entity_id(state: &mut HostState) -> rquickjs::Result<u32> {
+    let entity_id = state.next_entity_id;
+    state.next_entity_id = state
+        .next_entity_id
+        .checked_add(1)
+        .ok_or_else(|| rquickjs::Error::new_from_js("entity id", "u32 overflow"))?;
+    Ok(entity_id)
+}
+
+fn parse_body_type(value: &str) -> rquickjs::Result<RigidBodyKind> {
+    RigidBodyKind::parse(value).map_err(|_| {
+        rquickjs::Error::new_from_js("body type", "expected static, kinematic or dynamic")
     })
 }
 
@@ -115,39 +547,205 @@ fn read_snapshot(ctx: rquickjs::Ctx<'_>) -> Result<GameSnapshot> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn quickjs_executes_compiled_typescript_and_updates_game_rules() {
-        let queue = Arc::new(ArrayQueue::new(4096));
-        let game = ScriptEngine::new(queue).expect("initialize QuickJS-NG");
-
-        assert_eq!(game.snapshot().unwrap().status, GameStatus::Ready);
-        assert_eq!(game.launch().unwrap().status, GameStatus::Playing);
-
-        let state = game.brick_destroyed(100, 2).unwrap();
-        assert_eq!(state.score, 100);
-        assert_eq!(state.status, GameStatus::Playing);
-
-        let state = game.brick_destroyed(100, 0).unwrap();
-        assert_eq!(state.score, 200);
-        assert_eq!(state.status, GameStatus::Victory);
-
-        let reset = game.restart().unwrap();
-        assert_eq!(reset.score, 0);
-        assert_eq!(reset.lives, 3);
-        assert_eq!(reset.status, GameStatus::Ready);
+    fn audio_queue() -> Arc<ArrayQueue<f32>> {
+        Arc::new(ArrayQueue::new(32_768))
     }
 
     #[test]
-    fn losing_last_life_enters_game_over_inside_quickjs() {
-        let game = ScriptEngine::new(Arc::new(ArrayQueue::new(4096))).unwrap();
-        game.launch().unwrap();
-        game.ball_lost().unwrap();
-        game.launch().unwrap();
-        game.ball_lost().unwrap();
-        game.launch().unwrap();
-        let state = game.ball_lost().unwrap();
+    fn javascript_owns_game_creation_physics_and_audio_commands() {
+        let source = r#"
+            globalThis.game = {
+                initialize() {
+                    const kinematicEntity = engine.entities.createRectangle({
+                        x: 0, y: -3, width: 1.4, height: 0.2,
+                        r: 0.2, g: 0.8, b: 1, a: 1
+                    });
+                    engine.physics.createBox({
+                        entityId: kinematicEntity, x: 0, y: -3, width: 1.4, height: 0.2,
+                        bodyType: "kinematic", density: 0, friction: 0,
+                        restitution: 0.9, gravityScale: 0, bullet: false
+                    });
+                    this.audioAccepted = engine.audio.playTone(440, 0.05, 0.2);
+                    this.invalidAudioAccepted = engine.audio.playTone(0, 0.05, 0.2);
+                },
+                update() {
+                    if (engine.input.wasPressed("Space")) {
+                        engine.physics.setLinearVelocity(1, 2, 4);
+                    }
+                },
+                shutdown() {}
+            };
+        "#;
+        let queue = audio_queue();
+        let script = ScriptEngine::from_source(source, Arc::clone(&queue)).unwrap();
 
-        assert_eq!(state.lives, 0);
-        assert_eq!(state.status, GameStatus::GameOver);
+        script.initialize().unwrap();
+        let commands = script.drain_commands();
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            RuntimeCommand::CreateRectangle { entity_id: 1, .. }
+        )));
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            RuntimeCommand::CreateBoxBody {
+                entity_id: 1,
+                body_type: RigidBodyKind::Kinematic,
+                ..
+            }
+        )));
+        assert!(!queue.is_empty());
+        let (audio_accepted, invalid_audio_accepted) = script
+            .context
+            .with(|ctx| {
+                let game: Object<'_> = ctx.globals().get("game")?;
+                Ok::<_, rquickjs::Error>((
+                    game.get::<_, bool>("audioAccepted")?,
+                    game.get::<_, bool>("invalidAudioAccepted")?,
+                ))
+            })
+            .unwrap();
+        assert!(audio_accepted);
+        assert!(!invalid_audio_accepted);
+
+        script.set_frame(
+            1.0 / 60.0,
+            HashSet::new(),
+            HashSet::from(["Space".to_owned()]),
+            HashMap::new(),
+            Vec::new(),
+        );
+        script.update().unwrap();
+        assert!(script.drain_commands().iter().any(|command| matches!(
+            command,
+            RuntimeCommand::SetLinearVelocity {
+                entity_id: 1,
+                velocity: [2.0, 4.0]
+            }
+        )));
+    }
+
+    #[test]
+    fn collision_queries_are_repeatable_and_replaced_for_each_frame() {
+        let source = r#"
+            globalThis.game = {
+                firstCount: 0,
+                secondCount: 0,
+                firstEntityA: 0,
+                initialize() {},
+                update() {
+                    this.firstCount = engine.physics.collisionCount();
+                    this.secondCount = engine.physics.collisionCount();
+                    this.firstEntityA = engine.physics.collisionEntityA(0) ?? 0;
+                },
+                shutdown() {}
+            };
+        "#;
+        let script = ScriptEngine::from_source(source, audio_queue()).unwrap();
+
+        script.set_frame(
+            1.0 / 60.0,
+            HashSet::new(),
+            HashSet::new(),
+            HashMap::new(),
+            vec![CollisionEvent {
+                entity_a: 42,
+                entity_b: 7,
+            }],
+        );
+        script.update().unwrap();
+
+        let first_frame = script
+            .context
+            .with(|ctx| {
+                let game: Object<'_> = ctx.globals().get("game")?;
+                Ok::<_, rquickjs::Error>((
+                    game.get::<_, u32>("firstCount")?,
+                    game.get::<_, u32>("secondCount")?,
+                    game.get::<_, u32>("firstEntityA")?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(first_frame, (1, 1, 42));
+
+        script.set_frame(
+            1.0 / 60.0,
+            HashSet::new(),
+            HashSet::new(),
+            HashMap::new(),
+            Vec::new(),
+        );
+        script.update().unwrap();
+
+        let next_frame = script
+            .context
+            .with(|ctx| {
+                let game: Object<'_> = ctx.globals().get("game")?;
+                Ok::<_, rquickjs::Error>((
+                    game.get::<_, u32>("firstCount")?,
+                    game.get::<_, u32>("secondCount")?,
+                    game.get::<_, u32>("firstEntityA")?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(next_frame, (0, 0, 0));
+    }
+
+    #[test]
+    fn javascript_receives_native_positions_and_collision_events() {
+        let source = r#"
+            globalThis.game = {
+                collisionCount: 0,
+                x: 0,
+                initialize() {},
+                update() {
+                    const x = engine.entities.getPositionX(42);
+                    const y = engine.entities.getPositionY(42);
+                    if (x !== undefined) this.x = x;
+                    if (y !== undefined) this.y = y;
+                    const count = engine.physics.collisionCount();
+                    for (let index = 0; index < count; index += 1) {
+                        this.collisionCount += 1;
+                        this.lastEntityA = engine.physics.collisionEntityA(index);
+                        this.lastEntityB = engine.physics.collisionEntityB(index);
+                    }
+                },
+                shutdown() {}
+            };
+        "#;
+        let script = ScriptEngine::from_source(source, audio_queue()).unwrap();
+        script.set_frame(
+            0.016,
+            HashSet::new(),
+            HashSet::new(),
+            HashMap::from([(42, [3.0, -2.0])]),
+            vec![CollisionEvent {
+                entity_a: 42,
+                entity_b: 7,
+            }],
+        );
+        script.update().unwrap();
+
+        script
+            .context
+            .with(|ctx| -> rquickjs::Result<()> {
+                let game: Object = ctx.globals().get("game")?;
+                assert_eq!(game.get::<_, f32>("x")?, 3.0);
+                assert_eq!(game.get::<_, f32>("y")?, -2.0);
+                assert_eq!(game.get::<_, u32>("collisionCount")?, 1);
+                assert_eq!(game.get::<_, u32>("lastEntityA")?, 42);
+                assert_eq!(game.get::<_, u32>("lastEntityB")?, 7);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn runtime_propagates_script_errors_instead_of_silently_skipping_updates() {
+        let script = ScriptEngine::from_source(
+            "globalThis.game = { update() { throw new Error('game update failed'); } };",
+            audio_queue(),
+        )
+        .unwrap();
+        assert!(script.update().is_err());
     }
 }

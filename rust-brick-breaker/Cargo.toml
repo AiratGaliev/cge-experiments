@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
 publish = false
-description = "Standalone Brick Breaker proof of stack for SDL3, wgpu, Flecs, Box2D v3, miniaudio and QuickJS-NG"
+description = "Scripting-first native 2D runtime using SDL3, wgpu, Flecs, Box2D v3, miniaudio and QuickJS-NG"
 
 [dependencies]
 anyhow = "=1.0.100"

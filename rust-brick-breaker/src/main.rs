@@ -4,7 +4,11 @@ mod physics;
 mod render;
 mod scripting;
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context as _, Result};
 use sdl3::{
@@ -14,10 +18,10 @@ use sdl3::{
 };
 
 use audio::Audio;
-use ecs::EcsScene;
-use physics::Physics;
+use ecs::EcsWorld;
+use physics::PhysicsWorld;
 use render::Renderer;
-use scripting::{GameStatus, ScriptEngine};
+use scripting::{RuntimeCommand, ScriptEngine};
 
 const WINDOW_WIDTH: u32 = 960;
 const WINDOW_HEIGHT: u32 = 720;
@@ -27,58 +31,84 @@ const MAX_STEPS_PER_FRAME: usize = 6;
 
 #[derive(Default)]
 struct InputState {
-    left: bool,
-    right: bool,
-    launch_pressed: bool,
+    down: HashSet<String>,
+    pressed: HashSet<String>,
 }
 
 impl InputState {
-    fn horizontal(&self) -> f32 {
-        (self.right as i8 - self.left as i8) as f32
+    fn key_down(&mut self, key: &str) {
+        if self.down.insert(key.to_owned()) {
+            self.pressed.insert(key.to_owned());
+        }
     }
 
-    fn take_launch(&mut self) -> bool {
-        std::mem::take(&mut self.launch_pressed)
+    fn key_up(&mut self, key: &str) {
+        self.down.remove(key);
+    }
+
+    fn clear(&mut self) {
+        self.down.clear();
+        self.pressed.clear();
+    }
+
+    fn finish_frame(&mut self) {
+        self.pressed.clear();
     }
 }
 
 fn main() -> Result<()> {
+    let script_path = std::env::var_os("CGE_GAME_SCRIPT")
+        .map(PathBuf::from)
+        .or_else(|| std::env::args_os().nth(1).map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("assets/game.js"));
+
     let sdl = sdl3::init().context("initialize SDL3")?;
     let video = sdl.video().context("initialize SDL3 video subsystem")?;
     let window = video
-        .window(
-            "CGE Experiments — Native Brick Breaker",
-            WINDOW_WIDTH,
-            WINDOW_HEIGHT,
-        )
+        .window("Codogma Native 2D Runtime", WINDOW_WIDTH, WINDOW_HEIGHT)
         .position_centered()
         .resizable()
         .build()
         .map_err(|error| anyhow::anyhow!(error.to_string()))
         .context("create SDL3 window")?;
 
-    run_game(sdl, window)
+    run_runtime(sdl, window, &script_path)
 }
 
-fn run_game(sdl: sdl3::Sdl, window: Window) -> Result<()> {
+fn run_runtime(sdl: sdl3::Sdl, window: Window, script_path: &std::path::Path) -> Result<()> {
     let mut renderer =
         pollster::block_on(Renderer::new(&window)).context("initialize wgpu renderer")?;
     let mut event_pump = sdl.event_pump().context("create SDL3 event pump")?;
 
     let audio = Audio::new();
-    let scripting = ScriptEngine::new(audio.sample_queue())
-        .context("initialize embedded QuickJS-NG and load compiled TypeScript")?;
-    let mut physics = Physics::new().context("initialize Box2D v3 world")?;
-    let initial_positions = physics.positions()?;
-    let scene = EcsScene::new(&initial_positions).context("initialize Flecs ECS world")?;
+    let mut physics = PhysicsWorld::new([0.0, 0.0]).context("initialize Box2D v3 world")?;
+    let mut scene = EcsWorld::new();
+    let script = ScriptEngine::new(script_path, audio.sample_queue())
+        .context("load and initialize embedded QuickJS-NG game script")?;
 
+    script.initialize().context("initialize TypeScript game")?;
+    apply_commands(script.drain_commands(), &mut scene, &mut physics)?;
+
+    let rectangles = scene.draw_rectangles();
+    let circles = scene.draw_circles();
+    let labels = scene.draw_text();
+    let positions = physics.positions()?;
     println!("GPU adapter: {}", renderer.adapter_name());
-    println!("Controls: A/D or Left/Right to move, Space to launch/restart, Escape to quit.");
+    println!("Game script: {}", script_path.display());
+    println!(
+        "Initial scene: {} ECS entities, {} rectangles, {} circles, {} text labels, {} physics bodies",
+        scene.entity_count(),
+        rectangles.len(),
+        circles.len(),
+        labels.len(),
+        positions.len()
+    );
+    println!("Native runtime initialized. Press Escape to quit.");
 
     let mut input = InputState::default();
     let mut last_frame = Instant::now();
     let mut accumulator = 0.0_f32;
-    let mut snapshot = scripting.snapshot()?;
+    let mut pending_collisions = Vec::new();
 
     'running: loop {
         for event in event_pump.poll_iter() {
@@ -93,28 +123,21 @@ fn run_game(sdl: sdl3::Sdl, window: Window) -> Result<()> {
                     ..
                 } => break 'running,
                 Event::KeyDown {
-                    keycode: Some(Keycode::A | Keycode::Left),
+                    keycode: Some(key),
                     repeat: false,
                     ..
-                } => input.left = true,
+                } => {
+                    if let Some(name) = key_name(key) {
+                        input.key_down(name);
+                    }
+                }
                 Event::KeyUp {
-                    keycode: Some(Keycode::A | Keycode::Left),
-                    ..
-                } => input.left = false,
-                Event::KeyDown {
-                    keycode: Some(Keycode::D | Keycode::Right),
-                    repeat: false,
-                    ..
-                } => input.right = true,
-                Event::KeyUp {
-                    keycode: Some(Keycode::D | Keycode::Right),
-                    ..
-                } => input.right = false,
-                Event::KeyDown {
-                    keycode: Some(Keycode::Space),
-                    repeat: false,
-                    ..
-                } => input.launch_pressed = true,
+                    keycode: Some(key), ..
+                } => {
+                    if let Some(name) = key_name(key) {
+                        input.key_up(name);
+                    }
+                }
                 Event::Window {
                     win_event: WindowEvent::Resized(..) | WindowEvent::PixelSizeChanged(..),
                     ..
@@ -125,10 +148,7 @@ fn run_game(sdl: sdl3::Sdl, window: Window) -> Result<()> {
                 Event::Window {
                     win_event: WindowEvent::FocusLost,
                     ..
-                } => {
-                    input.left = false;
-                    input.right = false;
-                }
+                } => input.clear(),
                 _ => {}
             }
         }
@@ -139,81 +159,151 @@ fn run_game(sdl: sdl3::Sdl, window: Window) -> Result<()> {
         let frame_delta = frame_delta.min(MAX_FRAME_DELTA);
         accumulator = (accumulator + frame_delta).min(FIXED_STEP * MAX_STEPS_PER_FRAME as f32);
 
-        if input.take_launch() {
-            match snapshot.status {
-                GameStatus::Ready => {
-                    snapshot = scripting.launch()?;
-                    physics.launch()?;
-                }
-                GameStatus::Victory | GameStatus::GameOver => {
-                    let _ = scripting.restart()?;
-                    physics.reset()?;
-                    scene.reset_paddle();
-                    scene.reset_bricks();
-                    snapshot = scripting.launch()?;
-                    physics.launch()?;
-                }
-                GameStatus::Playing => {}
-            }
-        }
+        let positions = physics
+            .positions()
+            .context("read native physics transforms before game update")?;
+        script.set_frame(
+            frame_delta,
+            input.down.clone(),
+            input.pressed.clone(),
+            positions,
+            std::mem::take(&mut pending_collisions),
+        );
+        script.update().context("execute TypeScript game update")?;
 
-        let horizontal = input.horizontal();
-        scene.progress(horizontal, frame_delta);
+        apply_commands(script.drain_commands(), &mut scene, &mut physics)?;
+        scene.apply_pending_changes();
 
         let mut step_count = 0;
         while accumulator >= FIXED_STEP && step_count < MAX_STEPS_PER_FRAME {
-            physics.set_paddle_target(scene.paddle_x(), FIXED_STEP)?;
-            if snapshot.status != GameStatus::Playing {
-                physics.park_ball()?;
-            }
-
-            let step = physics.step(FIXED_STEP)?;
-            if snapshot.status == GameStatus::Playing {
-                if step.bounced {
-                    snapshot = scripting.bounced()?;
-                }
-
-                if !step.bricks_destroyed.is_empty() {
-                    scene.mark_bricks_destroyed(&step.bricks_destroyed);
-                    let bricks_before_step = step.remaining_bricks + step.bricks_destroyed.len();
-                    for destroyed_count in 0..step.bricks_destroyed.len() {
-                        let remaining = bricks_before_step.saturating_sub(destroyed_count + 1);
-                        snapshot = scripting.brick_destroyed(100, remaining)?;
-                    }
-                }
-
-                if step.ball_lost {
-                    snapshot = scripting.ball_lost()?;
-                    physics.park_ball()?;
-                }
-                if matches!(snapshot.status, GameStatus::Victory | GameStatus::GameOver) {
-                    physics.park_ball()?;
-                }
-            }
-
+            pending_collisions.extend(
+                physics
+                    .step(FIXED_STEP)
+                    .context("advance fixed-step Box2D simulation")?,
+            );
             accumulator -= FIXED_STEP;
             step_count += 1;
         }
 
         let positions = physics
             .positions()
-            .context("read Box2D transforms for ECS synchronization")?;
-        scene.set_physics_positions(&positions);
-        snapshot = scripting.snapshot()?;
+            .context("read Box2D transforms for Flecs synchronization")?;
+        scene.synchronize_physics(&positions);
 
         renderer
-            .render(&scene.draw_items(), snapshot)
-            .context("render Brick Breaker frame")?;
+            .render(
+                &scene.draw_rectangles(),
+                &scene.draw_circles(),
+                &scene.draw_text(),
+            )
+            .context("render native ECS scene")?;
 
+        input.finish_frame();
         if step_count == 0 {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
 
+    script.shutdown().context("shutdown TypeScript game")?;
     drop(renderer);
     drop(window);
     drop(audio);
     Ok(())
+}
+
+fn apply_commands(
+    commands: Vec<RuntimeCommand>,
+    scene: &mut EcsWorld,
+    physics: &mut PhysicsWorld,
+) -> Result<()> {
+    for command in commands {
+        match command {
+            RuntimeCommand::CreateRectangle {
+                entity_id,
+                x,
+                y,
+                width,
+                height,
+                color,
+            } => scene.create_rectangle(entity_id, x, y, width, height, color)?,
+            RuntimeCommand::CreateCircle {
+                entity_id,
+                x,
+                y,
+                radius,
+                color,
+            } => scene.create_circle(entity_id, x, y, radius, color)?,
+            RuntimeCommand::CreateText {
+                entity_id,
+                value,
+                x,
+                y,
+                scale,
+                color,
+            } => scene.create_text(entity_id, value, x, y, scale, color)?,
+            RuntimeCommand::SetPosition { entity_id, x, y } => {
+                if physics.has_body(entity_id) {
+                    physics.set_transform(entity_id, [x, y])?;
+                } else {
+                    scene.set_position(entity_id, x, y)?;
+                }
+            }
+            RuntimeCommand::SetText { entity_id, value } => {
+                scene.set_text(entity_id, value)?;
+            }
+            RuntimeCommand::DestroyEntity { entity_id } => {
+                if physics.has_body(entity_id) {
+                    physics.destroy_body(entity_id)?;
+                }
+                scene.destroy_entity(entity_id)?;
+            }
+            RuntimeCommand::CreateBoxBody {
+                entity_id,
+                position,
+                size,
+                body_type,
+                material,
+            } => {
+                physics.create_box(entity_id, position, size, body_type, material)?;
+                scene.attach_physics(entity_id)?;
+            }
+            RuntimeCommand::CreateCircleBody {
+                entity_id,
+                position,
+                radius,
+                body_type,
+                material,
+            } => {
+                physics.create_circle(entity_id, position, radius, body_type, material)?;
+                scene.attach_physics(entity_id)?;
+            }
+            RuntimeCommand::SetLinearVelocity {
+                entity_id,
+                velocity,
+            } => physics.set_linear_velocity(entity_id, velocity)?,
+            RuntimeCommand::SetBodyPosition {
+                entity_id,
+                position,
+            } => physics.set_transform(entity_id, position)?,
+            RuntimeCommand::DestroyBody { entity_id } => physics.destroy_body(entity_id)?,
+        }
+    }
+    Ok(())
+}
+
+fn key_name(key: Keycode) -> Option<&'static str> {
+    match key {
+        Keycode::A => Some("A"),
+        Keycode::D => Some("D"),
+        Keycode::W => Some("W"),
+        Keycode::S => Some("S"),
+        Keycode::Left => Some("ArrowLeft"),
+        Keycode::Right => Some("ArrowRight"),
+        Keycode::Up => Some("ArrowUp"),
+        Keycode::Down => Some("ArrowDown"),
+        Keycode::Space => Some("Space"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -221,29 +311,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn input_horizontal_direction_is_symmetric() {
-        let mut input = InputState {
-            left: true,
-            right: false,
-            launch_pressed: false,
-        };
-        assert_eq!(input.horizontal(), -1.0);
+    fn input_state_reports_down_and_just_pressed_separately() {
+        let mut input = InputState::default();
+        input.key_down("Space");
+        input.key_down("Space");
+        assert!(input.down.contains("Space"));
+        assert_eq!(input.pressed.len(), 1);
 
-        input.left = false;
-        input.right = true;
-        assert_eq!(input.horizontal(), 1.0);
-
-        input.left = true;
-        assert_eq!(input.horizontal(), 0.0);
+        input.finish_frame();
+        assert!(input.pressed.is_empty());
+        assert!(input.down.contains("Space"));
+        input.key_up("Space");
+        assert!(!input.down.contains("Space"));
     }
 
     #[test]
-    fn launch_input_is_consumed_once() {
-        let mut input = InputState {
-            launch_pressed: true,
-            ..InputState::default()
-        };
-        assert!(input.take_launch());
-        assert!(!input.take_launch());
+    fn focus_loss_clears_all_held_keys() {
+        let mut input = InputState::default();
+        input.key_down("A");
+        input.key_down("ArrowLeft");
+        input.clear();
+
+        assert!(input.down.is_empty());
+        assert!(input.pressed.is_empty());
+    }
+
+    #[test]
+    fn key_mapping_is_platform_neutral() {
+        assert_eq!(key_name(Keycode::Left), Some("ArrowLeft"));
+        assert_eq!(key_name(Keycode::Space), Some("Space"));
+        assert_eq!(key_name(Keycode::A), Some("A"));
+    }
+
+    #[test]
+    fn destroying_a_runtime_entity_also_destroys_its_physics_body() {
+        use crate::physics::{PhysicsMaterial, RigidBodyKind};
+
+        let mut scene = EcsWorld::new();
+        scene
+            .create_rectangle(1, 0.0, 0.0, 1.0, 1.0, [1.0; 4])
+            .unwrap();
+        let mut physics = PhysicsWorld::new([0.0, 0.0]).unwrap();
+        physics
+            .create_box(
+                1,
+                [0.0, 0.0],
+                [1.0, 1.0],
+                RigidBodyKind::Dynamic,
+                PhysicsMaterial {
+                    density: 1.0,
+                    restitution: 0.0,
+                    ..PhysicsMaterial::default()
+                },
+            )
+            .unwrap();
+        scene.attach_physics(1).unwrap();
+
+        apply_commands(
+            vec![RuntimeCommand::DestroyEntity { entity_id: 1 }],
+            &mut scene,
+            &mut physics,
+        )
+        .unwrap();
+
+        assert!(!physics.has_body(1));
+        assert_eq!(scene.entity_count(), 0);
+        assert!(scene.draw_rectangles().is_empty());
     }
 }

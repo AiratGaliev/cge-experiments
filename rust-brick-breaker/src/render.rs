@@ -8,15 +8,44 @@ use wgpu::{
     util::DeviceExt,
 };
 
-use crate::{
-    ecs::DrawItem,
-    scripting::{GameSnapshot, GameStatus},
-};
+use crate::ecs::{DrawCircle, DrawRectangle, DrawText};
 
 const WORLD_HALF_WIDTH: f32 = 5.0;
 const WORLD_HEIGHT: f32 = 7.5;
+const WORLD_ASPECT_RATIO: f32 = (WORLD_HALF_WIDTH * 2.0) / WORLD_HEIGHT;
 
-const SHADER: &str = include_str!("../assets/brick_breaker.wgsl");
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Viewport {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+fn calculate_viewport(surface_width: u32, surface_height: u32) -> Viewport {
+    let surface_width = surface_width.max(1) as f32;
+    let surface_height = surface_height.max(1) as f32;
+
+    if surface_width / surface_height > WORLD_ASPECT_RATIO {
+        let width = surface_height * WORLD_ASPECT_RATIO;
+        Viewport {
+            x: (surface_width - width) * 0.5,
+            y: 0.0,
+            width,
+            height: surface_height,
+        }
+    } else {
+        let height = surface_width / WORLD_ASPECT_RATIO;
+        Viewport {
+            x: 0.0,
+            y: (surface_height - height) * 0.5,
+            width: surface_width,
+            height,
+        }
+    }
+}
+
+const SHADER: &str = include_str!("../assets/flat_color_2d.wgsl");
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -97,7 +126,7 @@ impl<'window> Renderer<'window> {
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("Brick Breaker device"),
+                label: Some("Codogma native runtime device"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
@@ -114,16 +143,16 @@ impl<'window> Renderer<'window> {
         surface.configure(&device, &config);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Brick Breaker WGSL shader"),
+            label: Some("Codogma 2D WGSL shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER)),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Brick Breaker pipeline layout"),
+            label: Some("Codogma 2D pipeline layout"),
             bind_group_layouts: &[],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Brick Breaker rectangle pipeline"),
+            label: Some("Codogma 2D rectangle pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -172,7 +201,12 @@ impl<'window> Renderer<'window> {
         self.surface.configure(&self.device, &self.config);
     }
 
-    pub fn render(&mut self, items: &[DrawItem], game: GameSnapshot) -> Result<()> {
+    pub fn render(
+        &mut self,
+        rectangles: &[DrawRectangle],
+        circles: &[DrawCircle],
+        texts: &[DrawText],
+    ) -> Result<()> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -192,68 +226,40 @@ impl<'window> Renderer<'window> {
             }
         };
 
-        let mut vertices = Vec::with_capacity((items.len() + 500) * 6);
-        for item in items {
+        let mut vertices =
+            Vec::with_capacity((rectangles.len() + circles.len() * 24 + texts.len() * 24) * 6);
+        for item in rectangles {
             let center_x = item.x / WORLD_HALF_WIDTH;
-            let center_y = item.y / (WORLD_HEIGHT * 0.5) - 1.0;
+            let center_y = item.y / (WORLD_HEIGHT * 0.5);
             let width = item.width / WORLD_HALF_WIDTH;
             let height = item.height / (WORLD_HEIGHT * 0.5);
             push_rectangle(&mut vertices, center_x, center_y, width, height, item.color);
         }
-
-        push_text(
-            &mut vertices,
-            &format!("SCORE {}", game.score),
-            -0.96,
-            0.94,
-            0.014,
-            [0.88, 0.93, 1.0, 1.0],
-        );
-        push_text(
-            &mut vertices,
-            &format!("LIVES {}", game.lives),
-            0.54,
-            0.94,
-            0.014,
-            [0.88, 0.93, 1.0, 1.0],
-        );
-
-        let status_text = match game.status {
-            GameStatus::Ready => Some("SPACE TO LAUNCH"),
-            GameStatus::Playing => None,
-            GameStatus::Victory => Some("VICTORY"),
-            GameStatus::GameOver => Some("GAME OVER"),
-        };
-        if let Some(status) = status_text {
-            let scale = 0.024;
-            let text_width = status.chars().count() as f32 * 6.0 * scale;
-            push_text(
+        for item in circles {
+            push_circle(
                 &mut vertices,
-                status,
-                -text_width * 0.5,
-                0.16,
-                scale,
-                [1.0, 0.92, 0.64, 1.0],
+                item.x / WORLD_HALF_WIDTH,
+                item.y / (WORLD_HEIGHT * 0.5),
+                item.radius / WORLD_HALF_WIDTH,
+                item.radius / (WORLD_HEIGHT * 0.5),
+                item.color,
             );
         }
-        if matches!(game.status, GameStatus::Victory | GameStatus::GameOver) {
-            let restart_text = "SPACE TO RESTART";
-            let scale = 0.016;
-            let text_width = restart_text.chars().count() as f32 * 6.0 * scale;
+        for item in texts {
             push_text(
                 &mut vertices,
-                restart_text,
-                -text_width * 0.5,
-                -0.02,
-                scale,
-                [0.82, 0.88, 0.98, 1.0],
+                &item.value,
+                item.x,
+                item.y,
+                item.scale,
+                item.color,
             );
         }
 
         let vertex_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Brick Breaker frame vertices"),
+                label: Some("CGE native runtime frame vertices"),
                 contents: bytemuck::cast_slice(&vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
@@ -264,11 +270,11 @@ impl<'window> Renderer<'window> {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Brick Breaker frame encoder"),
+                label: Some("CGE native runtime frame encoder"),
             });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Brick Breaker main pass"),
+                label: Some("CGE native runtime render pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     depth_slice: None,
@@ -289,6 +295,15 @@ impl<'window> Renderer<'window> {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.pipeline);
+            let viewport = calculate_viewport(self.config.width, self.config.height);
+            pass.set_viewport(
+                viewport.x,
+                viewport.y,
+                viewport.width,
+                viewport.height,
+                0.0,
+                1.0,
+            );
             pass.set_vertex_buffer(0, vertex_buffer.slice(..));
             pass.draw(0..vertices.len() as u32, 0..1);
         }
@@ -325,6 +340,41 @@ fn push_rectangle(
     ]);
 }
 
+fn push_circle(
+    vertices: &mut Vec<Vertex>,
+    center_x: f32,
+    center_y: f32,
+    radius_x: f32,
+    radius_y: f32,
+    color: [f32; 4],
+) {
+    const SEGMENTS: usize = 24;
+    for segment in 0..SEGMENTS {
+        let angle_a = std::f32::consts::TAU * segment as f32 / SEGMENTS as f32;
+        let angle_b = std::f32::consts::TAU * (segment + 1) as f32 / SEGMENTS as f32;
+        vertices.extend_from_slice(&[
+            Vertex {
+                position: [center_x, center_y],
+                color,
+            },
+            Vertex {
+                position: [
+                    center_x + angle_a.cos() * radius_x,
+                    center_y + angle_a.sin() * radius_y,
+                ],
+                color,
+            },
+            Vertex {
+                position: [
+                    center_x + angle_b.cos() * radius_x,
+                    center_y + angle_b.sin() * radius_y,
+                ],
+                color,
+            },
+        ]);
+    }
+}
+
 fn push_text(
     vertices: &mut Vec<Vertex>,
     text: &str,
@@ -351,22 +401,31 @@ fn push_text(
 fn glyph_rows(character: char) -> [u8; 7] {
     match character {
         'A' => [14, 17, 17, 31, 17, 17, 17],
+        'B' => [30, 17, 17, 30, 17, 17, 30],
         'C' => [14, 17, 16, 16, 16, 17, 14],
+        'D' => [30, 17, 17, 17, 17, 17, 30],
         'E' => [31, 16, 16, 30, 16, 16, 31],
+        'F' => [31, 16, 16, 30, 16, 16, 16],
         'G' => [14, 17, 16, 23, 17, 17, 15],
         'H' => [17, 17, 17, 31, 17, 17, 17],
         'I' => [31, 4, 4, 4, 4, 4, 31],
+        'J' => [7, 2, 2, 2, 18, 18, 12],
+        'K' => [17, 18, 20, 24, 20, 18, 17],
         'L' => [16, 16, 16, 16, 16, 16, 31],
         'M' => [17, 27, 21, 21, 17, 17, 17],
         'N' => [17, 25, 25, 21, 19, 19, 17],
         'O' => [14, 17, 17, 17, 17, 17, 14],
         'P' => [30, 17, 17, 30, 16, 16, 16],
+        'Q' => [14, 17, 17, 17, 21, 18, 13],
         'R' => [30, 17, 17, 30, 20, 18, 17],
         'S' => [15, 16, 16, 14, 1, 1, 30],
         'T' => [31, 4, 4, 4, 4, 4, 4],
         'U' => [17, 17, 17, 17, 17, 17, 14],
         'V' => [17, 17, 17, 17, 17, 10, 4],
+        'W' => [17, 17, 17, 21, 21, 21, 10],
+        'X' => [17, 17, 10, 4, 10, 17, 17],
         'Y' => [17, 17, 10, 4, 4, 4, 4],
+        'Z' => [31, 1, 2, 4, 8, 16, 31],
         '0' => [14, 17, 19, 21, 25, 17, 14],
         '1' => [4, 12, 4, 4, 4, 4, 14],
         '2' => [14, 17, 1, 2, 4, 8, 31],
@@ -393,9 +452,16 @@ mod tests {
     }
 
     #[test]
+    fn circle_builder_generates_a_triangle_fan() {
+        let mut vertices = Vec::new();
+        push_circle(&mut vertices, 0.0, 0.0, 0.1, 0.1, [1.0; 4]);
+        assert_eq!(vertices.len(), 24 * 3);
+    }
+
+    #[test]
     fn glyph_builder_emits_pixels_for_known_characters() {
         let mut vertices = Vec::new();
-        push_text(&mut vertices, "SCORE 42", -0.5, 0.5, 0.02, [1.0; 4]);
+        push_text(&mut vertices, "TEXT 42", -0.5, 0.5, 0.02, [1.0; 4]);
         assert!(!vertices.is_empty());
     }
 
@@ -414,5 +480,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn viewport_uses_the_full_surface_at_the_native_world_aspect_ratio() {
+        let viewport = calculate_viewport(960, 720);
+        assert_eq!(
+            viewport,
+            Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 960.0,
+                height: 720.0,
+            }
+        );
+    }
+
+    #[test]
+    fn viewport_letterboxes_wide_surfaces_without_stretching_the_world() {
+        let viewport = calculate_viewport(1920, 1080);
+        assert!((viewport.x - 240.0).abs() < 0.01);
+        assert_eq!(viewport.y, 0.0);
+        assert!((viewport.width - 1440.0).abs() < 0.01);
+        assert_eq!(viewport.height, 1080.0);
+    }
+
+    #[test]
+    fn viewport_letterboxes_tall_surfaces_without_stretching_the_world() {
+        let viewport = calculate_viewport(720, 1280);
+        assert_eq!(viewport.x, 0.0);
+        assert!((viewport.y - 370.0).abs() < 0.01);
+        assert_eq!(viewport.width, 720.0);
+        assert!((viewport.height - 540.0).abs() < 0.01);
     }
 }

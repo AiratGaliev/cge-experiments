@@ -1,15 +1,17 @@
-name: Native Brick Breaker CI
+name: Native 2D Runtime CI
 
 on:
   push:
     branches:
       - "feat/cod-115-*"
+      - "feat/cge-native-2d-runtime-*"
     paths:
       - "rust-brick-breaker/**"
       - ".github/workflows/native-brick-breaker.yml"
   pull_request:
     branches:
       - main
+      - dev
     paths:
       - "rust-brick-breaker/**"
       - ".github/workflows/native-brick-breaker.yml"

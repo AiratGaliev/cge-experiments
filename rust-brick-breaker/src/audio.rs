@@ -10,7 +10,8 @@ use maudio::{
 };
 
 const CHANNELS: u32 = 2;
-const QUEUE_CAPACITY: usize = 16_384;
+const QUEUE_CAPACITY: usize = 32_768;
+const SAMPLE_RATE: f32 = 48_000.0;
 
 pub struct Audio {
     samples: Arc<ArrayQueue<f32>>,
@@ -61,23 +62,36 @@ impl Default for Audio {
     }
 }
 
-pub fn enqueue_sound(queue: &ArrayQueue<f32>, name: &str) {
-    let (frequency, duration, volume) = match name {
-        "bounce" => (520.0, 0.045, 0.18),
-        "brick" => (760.0, 0.085, 0.20),
-        "life_lost" => (180.0, 0.18, 0.24),
-        _ => return,
-    };
+pub fn enqueue_tone(
+    queue: &ArrayQueue<f32>,
+    frequency: f32,
+    duration_seconds: f32,
+    volume: f32,
+) -> bool {
+    if !frequency.is_finite()
+        || !(20.0..=20_000.0).contains(&frequency)
+        || !duration_seconds.is_finite()
+        || !(0.005..=2.0).contains(&duration_seconds)
+        || !volume.is_finite()
+        || !(0.0..=1.0).contains(&volume)
+    {
+        return false;
+    }
 
-    for sample in synthesize_tone(frequency, duration, volume) {
+    let frame_count = (SAMPLE_RATE * duration_seconds).round() as usize;
+    if frame_count > queue.capacity().saturating_sub(queue.len()) {
+        return false;
+    }
+
+    for sample in synthesize_tone(frequency, duration_seconds, volume) {
         if queue.push(sample).is_err() {
-            break;
+            return false;
         }
     }
+    true
 }
 
 fn synthesize_tone(frequency: f32, duration_seconds: f32, volume: f32) -> Vec<f32> {
-    const SAMPLE_RATE: f32 = 48_000.0;
     let frame_count = (SAMPLE_RATE * duration_seconds).round() as usize;
     (0..frame_count)
         .map(|frame| {
@@ -89,13 +103,13 @@ fn synthesize_tone(frequency: f32, duration_seconds: f32, volume: f32) -> Vec<f3
 }
 
 fn mix_mono_to_stereo(output: &mut [f32], mut next_sample: impl FnMut() -> Option<f32>) {
-    let complete_len = output.len() - output.len() % CHANNELS as usize;
-    for frame in output[..complete_len].chunks_exact_mut(CHANNELS as usize) {
+    let (frames, remainder) = output.as_chunks_mut::<2>();
+    for frame in frames {
         let sample = next_sample().unwrap_or(0.0);
         frame[0] = sample;
         frame[1] = sample;
     }
-    output[complete_len..].fill(0.0);
+    remainder.fill(0.0);
 }
 
 #[cfg(test)]
@@ -103,24 +117,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generated_effect_samples_are_finite_and_bounded() {
-        for (name, expected_count, maximum) in [
-            ("bounce", 2160_usize, 0.18_f32),
-            ("brick", 4080_usize, 0.20_f32),
-            ("life_lost", 8640_usize, 0.24_f32),
-        ] {
-            let queue = ArrayQueue::new(QUEUE_CAPACITY);
-            enqueue_sound(&queue, name);
-            let mut count = 0;
+    fn tone_generation_is_finite_bounded_and_uses_the_requested_duration() {
+        let queue = ArrayQueue::new(QUEUE_CAPACITY);
+        assert!(enqueue_tone(&queue, 440.0, 0.05, 0.2));
 
-            while let Some(sample) = queue.pop() {
-                assert!(sample.is_finite(), "{name}");
-                assert!(sample.abs() <= maximum, "{name}");
-                count += 1;
-            }
-
-            assert_eq!(count, expected_count, "{name}");
+        let mut count = 0;
+        while let Some(sample) = queue.pop() {
+            assert!(sample.is_finite());
+            assert!(sample.abs() <= 0.2);
+            count += 1;
         }
+        assert_eq!(count, 2400);
+    }
+
+    #[test]
+    fn invalid_tone_parameters_are_rejected() {
+        let queue = ArrayQueue::new(64);
+        assert!(!enqueue_tone(&queue, f32::NAN, 0.1, 0.5));
+        assert!(!enqueue_tone(&queue, 440.0, 3.0, 0.5));
+        assert!(!enqueue_tone(&queue, 440.0, 0.1, 1.5));
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn tone_is_rejected_without_partial_enqueue_when_queue_capacity_is_insufficient() {
+        let queue = ArrayQueue::new(1024);
+        assert!(!enqueue_tone(&queue, 440.0, 0.05, 0.2));
+        assert!(queue.is_empty());
     }
 
     #[test]
@@ -131,12 +154,5 @@ mod tests {
         mix_mono_to_stereo(&mut output, || source.next());
 
         assert_eq!(output, [0.25, 0.25, -0.5, -0.5, 0.0]);
-    }
-
-    #[test]
-    fn unknown_effect_does_not_write_to_audio_queue() {
-        let queue = ArrayQueue::new(64);
-        enqueue_sound(&queue, "not-a-sound");
-        assert!(queue.is_empty());
     }
 }
