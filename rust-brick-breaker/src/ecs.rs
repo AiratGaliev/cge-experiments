@@ -521,9 +521,7 @@ mod tests {
     #[test]
     fn detached_physics_body_leaves_visual_entity_alive_and_unlinked() {
         let mut scene = EcsWorld::new();
-        scene
-            .create_circle(8, 0.0, 0.0, 0.1, [1.0; 4])
-            .unwrap();
+        scene.create_circle(8, 0.0, 0.0, 0.1, [1.0; 4]).unwrap();
         scene.attach_physics(8).unwrap();
         assert!(scene.entity_has_physics_link(8));
 
