@@ -1,9 +1,3 @@
-mod audio;
-mod ecs;
-mod physics;
-mod render;
-mod scripting;
-
 use std::{
     collections::HashSet,
     path::PathBuf,
@@ -17,11 +11,13 @@ use sdl3::{
     video::Window,
 };
 
-use audio::Audio;
-use ecs::EcsWorld;
-use physics::PhysicsWorld;
-use render::Renderer;
-use scripting::{RuntimeCommand, ScriptEngine};
+use native_brick_breaker::{
+    audio::Audio,
+    ecs::EcsWorld,
+    physics::{PhysicsPositions, PhysicsWorld},
+    render::Renderer,
+    scripting::{RuntimeCommand, ScriptEngine},
+};
 
 const WINDOW_WIDTH: u32 = 960;
 const WINDOW_HEIGHT: u32 = 720;
@@ -87,12 +83,18 @@ fn run_runtime(sdl: sdl3::Sdl, window: Window, script_path: &std::path::Path) ->
         .context("load and initialize embedded QuickJS-NG game script")?;
 
     script.initialize().context("initialize TypeScript game")?;
-    apply_commands(script.drain_commands(), &mut scene, &mut physics)?;
+    let mut commands = Vec::new();
+    script.drain_commands_into(&mut commands);
+    apply_commands(&mut commands, &mut scene, &mut physics)?;
 
-    let rectangles = scene.draw_rectangles();
-    let circles = scene.draw_circles();
-    let labels = scene.draw_text();
-    let positions = physics.positions()?;
+    let mut rectangles = Vec::new();
+    let mut circles = Vec::new();
+    let mut labels = Vec::new();
+    scene.draw_rectangles_into(&mut rectangles);
+    scene.draw_circles_into(&mut circles);
+    scene.draw_text_into(&mut labels);
+    let mut positions = PhysicsPositions::new();
+    physics.positions_into(&mut positions)?;
     println!("GPU adapter: {}", renderer.adapter_name());
     println!("Game script: {}", script_path.display());
     println!(
@@ -159,43 +161,43 @@ fn run_runtime(sdl: sdl3::Sdl, window: Window, script_path: &std::path::Path) ->
         let frame_delta = frame_delta.min(MAX_FRAME_DELTA);
         accumulator = (accumulator + frame_delta).min(FIXED_STEP * MAX_STEPS_PER_FRAME as f32);
 
-        let positions = physics
-            .positions()
+        physics
+            .positions_into(&mut positions)
             .context("read native physics transforms before game update")?;
-        script.set_frame(
-            frame_delta,
-            input.down.clone(),
-            input.pressed.clone(),
-            positions,
-            std::mem::take(&mut pending_collisions),
-        );
-        script.update().context("execute TypeScript game update")?;
+        script
+            .update_frame(
+                frame_delta,
+                &mut input.down,
+                &mut input.pressed,
+                &mut positions,
+                &mut pending_collisions,
+            )
+            .context("execute TypeScript game update")?;
+        pending_collisions.clear();
 
-        apply_commands(script.drain_commands(), &mut scene, &mut physics)?;
+        script.drain_commands_into(&mut commands);
+        apply_commands(&mut commands, &mut scene, &mut physics)?;
         scene.apply_pending_changes();
 
         let mut step_count = 0;
         while accumulator >= FIXED_STEP && step_count < MAX_STEPS_PER_FRAME {
-            pending_collisions.extend(
-                physics
-                    .step(FIXED_STEP)
-                    .context("advance fixed-step Box2D simulation")?,
-            );
+            physics
+                .step_into(FIXED_STEP, &mut pending_collisions)
+                .context("advance fixed-step Box2D simulation")?;
             accumulator -= FIXED_STEP;
             step_count += 1;
         }
 
-        let positions = physics
-            .positions()
+        physics
+            .positions_into(&mut positions)
             .context("read Box2D transforms for Flecs synchronization")?;
         scene.synchronize_physics(&positions);
 
+        scene.draw_rectangles_into(&mut rectangles);
+        scene.draw_circles_into(&mut circles);
+        scene.draw_text_into(&mut labels);
         renderer
-            .render(
-                &scene.draw_rectangles(),
-                &scene.draw_circles(),
-                &scene.draw_text(),
-            )
+            .render(&rectangles, &circles, &labels)
             .context("render native ECS scene")?;
 
         input.finish_frame();
@@ -212,11 +214,11 @@ fn run_runtime(sdl: sdl3::Sdl, window: Window, script_path: &std::path::Path) ->
 }
 
 fn apply_commands(
-    commands: Vec<RuntimeCommand>,
+    commands: &mut Vec<RuntimeCommand>,
     scene: &mut EcsWorld,
     physics: &mut PhysicsWorld,
 ) -> Result<()> {
-    for command in commands {
+    for command in commands.drain(..) {
         match command {
             RuntimeCommand::CreateRectangle {
                 entity_id,
@@ -345,7 +347,7 @@ mod tests {
 
     #[test]
     fn destroying_a_runtime_entity_also_destroys_its_physics_body() {
-        use crate::physics::{PhysicsMaterial, RigidBodyKind};
+        use native_brick_breaker::physics::{PhysicsMaterial, RigidBodyKind};
 
         let mut scene = EcsWorld::new();
         scene
@@ -368,7 +370,7 @@ mod tests {
         scene.attach_physics(1).unwrap();
 
         apply_commands(
-            vec![RuntimeCommand::DestroyEntity { entity_id: 1 }],
+            &mut vec![RuntimeCommand::DestroyEntity { entity_id: 1 }],
             &mut scene,
             &mut physics,
         )

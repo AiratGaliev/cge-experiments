@@ -57,6 +57,8 @@ pub struct PhysicsWorld {
     bodies: HashMap<u32, BodyId>,
     body_shapes: HashMap<u32, ShapeId>,
     shape_entities: HashMap<ShapeId, u32>,
+    contact_shape_pairs: Vec<(ShapeId, ShapeId)>,
+    unique_entity_pairs: HashSet<(u32, u32)>,
 }
 
 impl PhysicsWorld {
@@ -81,6 +83,8 @@ impl PhysicsWorld {
             bodies: HashMap::new(),
             body_shapes: HashMap::new(),
             shape_entities: HashMap::new(),
+            contact_shape_pairs: Vec::new(),
+            unique_entity_pairs: HashSet::new(),
         })
     }
 
@@ -236,10 +240,24 @@ impl PhysicsWorld {
     }
 
     pub fn step(&mut self, delta_seconds: f32) -> Result<Vec<CollisionEvent>> {
+        let mut collisions = Vec::new();
+        self.step_into(delta_seconds, &mut collisions)?;
+        Ok(collisions)
+    }
+
+    /// Advances Box2D and appends newly-begun contacts to a caller-owned buffer.
+    /// The internal contact scratch collections retain their capacity between steps.
+    pub fn step_into(
+        &mut self,
+        delta_seconds: f32,
+        collisions: &mut Vec<CollisionEvent>,
+    ) -> Result<()> {
         if !delta_seconds.is_finite() || delta_seconds <= 0.0 {
             bail!("physics delta must be finite and positive");
         }
-        let shape_pairs: Vec<(ShapeId, ShapeId)> = {
+
+        self.contact_shape_pairs.clear();
+        {
             let completed = self
                 .world
                 .step(delta_seconds, SOLVER_SUB_STEPS)
@@ -247,19 +265,19 @@ impl PhysicsWorld {
             let contacts = completed
                 .contact_events()
                 .context("read Box2D v3 contact events")?;
-            contacts
-                .begin()
-                .iter()
-                .map(|event| (event.shape_a, event.shape_b))
-                .collect()
-        };
+            self.contact_shape_pairs.extend(
+                contacts
+                    .begin()
+                    .iter()
+                    .map(|event| (event.shape_a, event.shape_b)),
+            );
+        }
 
-        let mut unique = HashSet::new();
-        let mut collisions = Vec::new();
-        for (shape_a, shape_b) in shape_pairs {
+        self.unique_entity_pairs.clear();
+        for (shape_a, shape_b) in &self.contact_shape_pairs {
             let (Some(&entity_a), Some(&entity_b)) = (
-                self.shape_entities.get(&shape_a),
-                self.shape_entities.get(&shape_b),
+                self.shape_entities.get(shape_a),
+                self.shape_entities.get(shape_b),
             ) else {
                 continue;
             };
@@ -268,23 +286,31 @@ impl PhysicsWorld {
             } else {
                 (entity_b, entity_a)
             };
-            if unique.insert(pair) {
+            if self.unique_entity_pairs.insert(pair) {
                 collisions.push(CollisionEvent {
                     entity_a: pair.0,
                     entity_b: pair.1,
                 });
             }
         }
-        Ok(collisions)
+        Ok(())
     }
 
     pub fn positions(&mut self) -> Result<PhysicsPositions> {
         let mut result = PhysicsPositions::with_capacity(self.bodies.len());
+        self.positions_into(&mut result)?;
+        Ok(result)
+    }
+
+    /// Refreshes a reusable position map without discarding its allocation.
+    pub fn positions_into(&mut self, result: &mut PhysicsPositions) -> Result<()> {
+        result.clear();
+        result.reserve(self.bodies.len());
         for (entity_id, body) in &self.bodies {
             let position = self.world.body(*body)?.position()?;
             result.insert(*entity_id, [position.x, position.y]);
         }
-        Ok(result)
+        Ok(())
     }
 }
 
@@ -415,5 +441,66 @@ mod tests {
         physics.destroy_body(3).unwrap();
         assert!(!physics.has_body(3));
         assert!(physics.positions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reusable_snapshots_preserve_capacity_and_refresh_positions() {
+        let mut physics = PhysicsWorld::new([0.0, 0.0]).unwrap();
+        physics
+            .create_circle(7, [1.25, -2.5], 0.2, RigidBodyKind::Dynamic, material(1.0))
+            .unwrap();
+
+        let mut positions = PhysicsPositions::with_capacity(8);
+        let original_capacity = positions.capacity();
+        physics.positions_into(&mut positions).unwrap();
+
+        assert_eq!(positions.get(&7), Some(&[1.25, -2.5]));
+        let populated_capacity = positions.capacity();
+        physics.set_transform(7, [3.0, 4.0]).unwrap();
+        physics.positions_into(&mut positions).unwrap();
+
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions.get(&7), Some(&[3.0, 4.0]));
+        assert_eq!(positions.capacity(), populated_capacity);
+        assert!(populated_capacity >= original_capacity);
+    }
+
+    #[test]
+    fn step_into_appends_contacts_to_reusable_output() {
+        let mut physics = PhysicsWorld::new([0.0, 0.0]).unwrap();
+        physics
+            .create_box(
+                1,
+                [-1.0, 0.0],
+                [0.5, 2.0],
+                RigidBodyKind::Static,
+                material(0.0),
+            )
+            .unwrap();
+        physics
+            .create_circle(2, [0.0, 0.0], 0.2, RigidBodyKind::Dynamic, material(1.0))
+            .unwrap();
+        physics.set_linear_velocity(2, [-5.0, 0.0]).unwrap();
+
+        let sentinel = CollisionEvent {
+            entity_a: 90,
+            entity_b: 91,
+        };
+        let mut collisions = vec![sentinel];
+        for _ in 0..30 {
+            physics.step_into(1.0 / 60.0, &mut collisions).unwrap();
+            if collisions.len() > 1 {
+                break;
+            }
+        }
+
+        assert_eq!(collisions[0], sentinel);
+        assert!(
+            collisions.iter().any(|event| {
+                (event.entity_a, event.entity_b) == (1, 2)
+                    || (event.entity_a, event.entity_b) == (2, 1)
+            }),
+            "reusable collision buffer should receive Box2D begin-contact events"
+        );
     }
 }

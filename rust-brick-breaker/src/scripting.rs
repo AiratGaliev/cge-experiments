@@ -7,7 +7,8 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use crossbeam_queue::ArrayQueue;
-use rquickjs::{Context, Function, Object, Runtime};
+use rquickjs::prelude::This;
+use rquickjs::{Array, Context, Function, Object, Persistent, Runtime};
 
 use crate::{
     audio::enqueue_tone,
@@ -94,7 +95,45 @@ struct HostState {
     frame: HostFrame,
 }
 
+#[derive(Clone, Copy)]
+enum GameHook {
+    Initialize,
+    Update,
+    Shutdown,
+}
+
+impl GameHook {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Initialize => "initialize",
+            Self::Update => "update",
+            Self::Shutdown => "shutdown",
+        }
+    }
+}
+
+#[derive(Default)]
+struct GameHooks {
+    game: Option<Persistent<Object<'static>>>,
+    engine: Option<Persistent<Object<'static>>>,
+    initialize: Option<Persistent<Function<'static>>>,
+    update: Option<Persistent<Function<'static>>>,
+    shutdown: Option<Persistent<Function<'static>>>,
+}
+
+impl GameHooks {
+    fn function(&self, hook: GameHook) -> Option<&Persistent<Function<'static>>> {
+        match hook {
+            GameHook::Initialize => self.initialize.as_ref(),
+            GameHook::Update => self.update.as_ref(),
+            GameHook::Shutdown => self.shutdown.as_ref(),
+        }
+    }
+}
+
 pub struct ScriptEngine {
+    // Persistent JS values must be dropped before Context and Runtime.
+    hooks: GameHooks,
     context: Context,
     _runtime: Runtime,
     host: Arc<Mutex<HostState>>,
@@ -115,8 +154,8 @@ impl ScriptEngine {
             ..HostState::default()
         }));
 
-        context
-            .with(|ctx| -> rquickjs::Result<()> {
+        let hooks = context
+            .with(|ctx| -> rquickjs::Result<GameHooks> {
                 let engine = Object::new(ctx.clone())?;
 
                 let entities = Object::new(ctx.clone())?;
@@ -273,6 +312,37 @@ impl ScriptEngine {
                                 .get(&entity_id)
                                 .map(|position| position[1])
                         })?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    entities.set(
+                        "readPositions",
+                        Function::new(
+                            ctx.clone(),
+                            move |entity_ids: Array<'_>, output: Object<'_>| -> rquickjs::Result<()> {
+                                let required_len = entity_ids.len() * 2;
+                                let output_len = output.get::<_, usize>("length")?;
+                                if !output.is_typed_array::<f32>() || output_len != required_len {
+                                    return Err(rquickjs::Error::new_from_js(
+                                        "Float32Array",
+                                        "output must be a Float32Array with entityIds.length * 2 elements",
+                                    ));
+                                }
+                                let state = lock(&state);
+                                for (index, entity_id) in entity_ids.iter::<u32>().enumerate() {
+                                    let position = state
+                                        .frame
+                                        .positions
+                                        .get(&entity_id?)
+                                        .copied()
+                                        .unwrap_or([0.0, 0.0]);
+                                    output.set((index * 2) as u32, position[0])?;
+                                    output.set((index * 2 + 1) as u32, position[1])?;
+                                }
+                                Ok(())
+                            },
+                        )?,
                     )?;
                 }
                 engine.set("entities", entities)?;
@@ -465,13 +535,28 @@ impl ScriptEngine {
                 }
                 engine.set("audio", audio)?;
 
-                ctx.globals().set("engine", engine)?;
+                ctx.globals().set("engine", engine.clone())?;
                 ctx.eval::<(), _>(source)?;
-                Ok(())
+
+                let Some(game) = ctx.globals().get::<_, Option<Object>>("game")? else {
+                    return Ok(GameHooks::default());
+                };
+                let initialize = game.get::<_, Option<Function>>("initialize")?;
+                let update = game.get::<_, Option<Function>>("update")?;
+                let shutdown = game.get::<_, Option<Function>>("shutdown")?;
+
+                Ok(GameHooks {
+                    game: Some(Persistent::save(&ctx, game)),
+                    engine: Some(Persistent::save(&ctx, engine)),
+                    initialize: initialize.map(|function| Persistent::save(&ctx, function)),
+                    update: update.map(|function| Persistent::save(&ctx, function)),
+                    shutdown: shutdown.map(|function| Persistent::save(&ctx, function)),
+                })
             })
-            .context("install native engine API and evaluate TypeScript output")?;
+            .context("install native engine API, evaluate script and cache lifecycle hooks")?;
 
         Ok(Self {
+            hooks,
             context,
             _runtime: runtime,
             host,
@@ -479,24 +564,33 @@ impl ScriptEngine {
     }
 
     pub fn initialize(&self) -> Result<()> {
-        self.call_hook("initialize")
+        self.call_hook(GameHook::Initialize)
     }
 
     pub fn update(&self) -> Result<()> {
-        self.call_hook("update")
+        self.call_hook(GameHook::Update)
     }
 
     pub fn shutdown(&self) -> Result<()> {
-        self.call_hook("shutdown")
+        self.call_hook(GameHook::Shutdown)
     }
 
-    fn call_hook(&self, hook: &str) -> Result<()> {
-        let source = format!(
-            "if (globalThis.game && typeof game.{hook} === 'function') game.{hook}(engine);"
-        );
+    fn call_hook(&self, hook: GameHook) -> Result<()> {
+        let (Some(game), Some(engine), Some(function)) = (
+            self.hooks.game.as_ref(),
+            self.hooks.engine.as_ref(),
+            self.hooks.function(hook),
+        ) else {
+            return Ok(());
+        };
+
         self.context.with(|ctx| -> anyhow::Result<()> {
-            ctx.eval::<(), _>(source.as_str())
-                .with_context(|| format!("execute game.{hook}() in QuickJS-NG"))?;
+            let game = game.clone().restore(&ctx)?;
+            let engine = engine.clone().restore(&ctx)?;
+            let function = function.clone().restore(&ctx)?;
+            function
+                .call::<_, ()>((This(game), engine))
+                .with_context(|| format!("execute game.{}() in QuickJS-NG", hook.name()))?;
             Ok(())
         })
     }
@@ -517,8 +611,46 @@ impl ScriptEngine {
         state.frame.collisions = collisions;
     }
 
+    /// Temporarily hands frame buffers to the host state without cloning their contents.
+    /// All buffers are returned to the caller after the synchronous QuickJS update,
+    /// including when the script returns an exception.
+    pub fn update_frame(
+        &self,
+        delta_seconds: f32,
+        keys_down: &mut HashSet<String>,
+        keys_pressed: &mut HashSet<String>,
+        positions: &mut HashMap<u32, [f32; 2]>,
+        collisions: &mut Vec<CollisionEvent>,
+    ) -> Result<()> {
+        {
+            let mut state = lock(&self.host);
+            state.frame.delta_seconds = delta_seconds;
+            std::mem::swap(&mut state.frame.keys_down, keys_down);
+            std::mem::swap(&mut state.frame.keys_pressed, keys_pressed);
+            std::mem::swap(&mut state.frame.positions, positions);
+            std::mem::swap(&mut state.frame.collisions, collisions);
+        }
+
+        let update_result = self.update();
+
+        {
+            let mut state = lock(&self.host);
+            std::mem::swap(&mut state.frame.keys_down, keys_down);
+            std::mem::swap(&mut state.frame.keys_pressed, keys_pressed);
+            std::mem::swap(&mut state.frame.positions, positions);
+            std::mem::swap(&mut state.frame.collisions, collisions);
+        }
+
+        update_result
+    }
     pub fn drain_commands(&self) -> Vec<RuntimeCommand> {
         std::mem::take(&mut lock(&self.host).commands)
+    }
+
+    pub fn drain_commands_into(&self, commands: &mut Vec<RuntimeCommand>) {
+        commands.clear();
+        let mut state = lock(&self.host);
+        std::mem::swap(commands, &mut state.commands);
     }
 }
 
@@ -739,6 +871,179 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn cached_lifecycle_hooks_preserve_this_binding_and_engine_argument() {
+        let source = r#"
+            globalThis.game = {
+                calls: 0,
+                engineMatches: true,
+                initialize(engine) {
+                    this.calls += 1;
+                    this.engineMatches = this.engineMatches && engine === globalThis.engine;
+                },
+                update(engine) {
+                    this.calls += 1;
+                    this.engineMatches = this.engineMatches && engine === globalThis.engine;
+                },
+                shutdown(engine) {
+                    this.calls += 1;
+                    this.engineMatches = this.engineMatches && engine === globalThis.engine;
+                }
+            };
+        "#;
+        let script = ScriptEngine::from_source(source, audio_queue()).unwrap();
+        script.initialize().unwrap();
+        script.update().unwrap();
+        script.shutdown().unwrap();
+
+        script
+            .context
+            .with(|ctx| -> rquickjs::Result<()> {
+                let game: Object<'_> = ctx.globals().get("game")?;
+                assert_eq!(game.get::<_, u32>("calls")?, 3);
+                assert!(game.get::<_, bool>("engineMatches")?);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn batch_position_api_fills_reusable_typed_array() {
+        let source = r#"
+            globalThis.game = {
+                output: new Float32Array(4),
+                initialize() {},
+                update(engine) {
+                    engine.entities.readPositions([42, 7], this.output);
+                },
+                shutdown() {}
+            };
+        "#;
+        let script = ScriptEngine::from_source(source, audio_queue()).unwrap();
+        script.set_frame(
+            1.0 / 60.0,
+            HashSet::new(),
+            HashSet::new(),
+            HashMap::from([(42, [3.5, -2.25]), (7, [10.0, 4.5])]),
+            Vec::new(),
+        );
+        script.update().unwrap();
+
+        script
+            .context
+            .with(|ctx| -> rquickjs::Result<()> {
+                let values: Vec<f32> = ctx.eval("Array.from(game.output)")?;
+                assert_eq!(values, vec![3.5, -2.25, 10.0, 4.5]);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn batch_position_api_rejects_mismatched_output_buffer_length() {
+        let source = r#"
+            globalThis.game = {
+                initialize() {},
+                update(engine) {
+                    engine.entities.readPositions([1, 2], new Float32Array(2));
+                },
+                shutdown() {}
+            };
+        "#;
+        let script = ScriptEngine::from_source(source, audio_queue()).unwrap();
+        assert!(script.update().is_err());
+    }
+    #[test]
+    fn zero_copy_frame_handoff_restores_all_caller_owned_buffers() {
+        let source = r#"
+            globalThis.game = {
+                observed: null,
+                initialize() {},
+                update(engine) {
+                    this.observed = {
+                        x: engine.entities.getPositionX(42),
+                        down: engine.input.isDown("A"),
+                        pressed: engine.input.wasPressed("Space"),
+                        collisions: engine.physics.collisionCount()
+                    };
+                },
+                shutdown() {}
+            };
+        "#;
+        let script = ScriptEngine::from_source(source, audio_queue()).unwrap();
+        let mut keys_down = HashSet::from([String::from("A")]);
+        let mut keys_pressed = HashSet::from([String::from("Space")]);
+        let mut positions = HashMap::from([(42, [3.5, -2.25])]);
+        let mut collisions = vec![CollisionEvent {
+            entity_a: 42,
+            entity_b: 7,
+        }];
+
+        script
+            .update_frame(
+                1.0 / 60.0,
+                &mut keys_down,
+                &mut keys_pressed,
+                &mut positions,
+                &mut collisions,
+            )
+            .unwrap();
+
+        assert!(keys_down.contains("A"));
+        assert!(keys_pressed.contains("Space"));
+        assert_eq!(positions.get(&42), Some(&[3.5, -2.25]));
+        assert_eq!(collisions.len(), 1);
+        assert_eq!((collisions[0].entity_a, collisions[0].entity_b), (42, 7));
+
+        script
+            .context
+            .with(|ctx| -> rquickjs::Result<()> {
+                let game: Object<'_> = ctx.globals().get("game")?;
+                let observed: Object<'_> = game.get("observed")?;
+                assert_eq!(observed.get::<_, f32>("x")?, 3.5);
+                assert!(observed.get::<_, bool>("down")?);
+                assert!(observed.get::<_, bool>("pressed")?);
+                assert_eq!(observed.get::<_, u32>("collisions")?, 1);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn zero_copy_frame_handoff_restores_buffers_when_script_fails() {
+        let source = r#"
+            globalThis.game = {
+                initialize() {},
+                update() { throw new Error("expected test failure"); },
+                shutdown() {}
+            };
+        "#;
+        let script = ScriptEngine::from_source(source, audio_queue()).unwrap();
+        let mut keys_down = HashSet::from([String::from("D")]);
+        let mut keys_pressed = HashSet::new();
+        let mut positions = HashMap::from([(5, [1.0, 2.0])]);
+        let mut collisions = vec![CollisionEvent {
+            entity_a: 5,
+            entity_b: 6,
+        }];
+
+        assert!(
+            script
+                .update_frame(
+                    1.0 / 60.0,
+                    &mut keys_down,
+                    &mut keys_pressed,
+                    &mut positions,
+                    &mut collisions,
+                )
+                .is_err()
+        );
+        assert!(keys_down.contains("D"));
+        assert!(keys_pressed.is_empty());
+        assert_eq!(positions.get(&5), Some(&[1.0, 2.0]));
+        assert_eq!(collisions.len(), 1);
+        assert_eq!((collisions[0].entity_a, collisions[0].entity_b), (5, 6));
+    }
     #[test]
     fn runtime_propagates_script_errors_instead_of_silently_skipping_updates() {
         let script = ScriptEngine::from_source(
