@@ -87,9 +87,19 @@ interface PhysicsApi {
     collisionEntityB(index: number): number | undefined;
 }
 
+type GamepadButton = "South" | "DPadLeft" | "DPadRight";
+
+interface GamepadApi {
+    connected(): boolean;
+    leftStickX(): number;
+    isDown(button: GamepadButton): boolean;
+    wasPressed(button: GamepadButton): boolean;
+}
+
 interface InputApi {
     isDown(key: string): boolean;
     wasPressed(key: string): boolean;
+    gamepad: GamepadApi;
 }
 
 interface AudioApi {
@@ -188,7 +198,10 @@ class BrickBreakerGame implements GameLifecycle {
             this.checkBallLost(runtime);
         }
 
-        if (runtime.input.wasPressed("Space")) {
+        if (
+            runtime.input.wasPressed("Space")
+            || runtime.input.gamepad.wasPressed("South")
+        ) {
             this.handleSpace();
         }
 
@@ -265,9 +278,18 @@ class BrickBreakerGame implements GameLifecycle {
     }
 
     private updatePaddle(runtime: EngineApi): void {
-        const left = runtime.input.isDown("A") || runtime.input.isDown("ArrowLeft");
-        const right = runtime.input.isDown("D") || runtime.input.isDown("ArrowRight");
-        const direction = Number(right) - Number(left);
+        const gamepad = runtime.input.gamepad;
+        const left = runtime.input.isDown("A")
+            || runtime.input.isDown("ArrowLeft")
+            || gamepad.isDown("DPadLeft");
+        const right = runtime.input.isDown("D")
+            || runtime.input.isDown("ArrowRight")
+            || gamepad.isDown("DPadRight");
+        const digitalDirection = Number(right) - Number(left);
+        const direction = Math.max(
+            -1,
+            Math.min(1, digitalDirection + gamepad.leftStickX()),
+        );
         const x = runtime.entities.getPositionX(this.paddleId) ?? 0;
 
         let velocity = direction * 8.0;

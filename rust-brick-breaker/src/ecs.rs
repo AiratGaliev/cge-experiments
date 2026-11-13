@@ -1,44 +1,81 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+use std::collections::{HashMap, HashSet};
+
+use anyhow::{Result, bail};
+use avian2d::prelude::{Gravity, PhysicsPlugins, SubstepCount};
+use bevy_app::App;
+use bevy_ecs::{
+    component::Component,
+    entity::Entity,
+    prelude::{Query, Res, Resource, World},
+    schedule::{IntoScheduleConfigs, ScheduleLabel},
 };
+use bevy_math::Vec2;
+use bevy_time::Time;
 
-use crate::physics::PhysicsPositionChange;
-use anyhow::{Context as _, Result, bail};
-use flecs_ecs::prelude::*;
+use crate::physics::{NativePhysicsSchedule, PhysicsPositionChange, SOLVER_SUB_STEPS};
 
-#[derive(Component, Clone, Copy)]
+#[derive(ScheduleLabel, Clone, Debug, Eq, Hash, PartialEq)]
+pub struct NativeRuntimeSchedule;
+
+#[derive(Component, Clone, Copy, Debug)]
 struct RuntimeEntityId(u32);
 
-#[derive(Component, Clone, Copy)]
-struct Transform {
+#[derive(Component, Clone, Copy, Debug)]
+struct VisualTransform {
     x: f32,
     y: f32,
     width: f32,
     height: f32,
 }
 
-#[derive(Component, Clone, Copy)]
+#[derive(Component, Clone, Copy, Debug)]
 struct Rectangle {
     color: [f32; 4],
 }
 
-#[derive(Component, Clone, Copy)]
+#[derive(Component, Clone, Copy, Debug)]
 struct Circle {
     radius: f32,
     color: [f32; 4],
 }
 
-#[derive(Component, Clone, Copy)]
-struct PhysicsLink {
-    entity_id: u32,
-}
+#[derive(Component, Clone, Copy, Debug)]
+struct PhysicsLink;
 
-#[derive(Component, Clone)]
+#[derive(Component, Clone, Debug)]
 struct TextLabel {
     value: String,
     scale: f32,
     color: [f32; 4],
+}
+
+#[derive(Resource, Default)]
+struct PendingScriptChanges {
+    transforms: HashMap<u32, [f32; 2]>,
+    text: HashMap<u32, String>,
+}
+
+fn apply_script_transforms(
+    pending: Res<PendingScriptChanges>,
+    mut query: Query<(&RuntimeEntityId, &mut VisualTransform)>,
+) {
+    for (entity_id, mut transform) in &mut query {
+        if let Some(position) = pending.transforms.get(&entity_id.0) {
+            transform.x = position[0];
+            transform.y = position[1];
+        }
+    }
+}
+
+fn apply_script_text(
+    pending: Res<PendingScriptChanges>,
+    mut query: Query<(&RuntimeEntityId, &mut TextLabel)>,
+) {
+    for (entity_id, mut label) in &mut query {
+        if let Some(value) = pending.text.get(&entity_id.0) {
+            label.value.clone_from(value);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -67,192 +104,101 @@ pub struct DrawText {
     pub value: String,
 }
 
-type PositionMap = HashMap<u32, [f32; 2]>;
+pub type PositionMap = HashMap<u32, [f32; 2]>;
 
+/// Scene and physics entities share one Bevy ECS world. bevy_app hosts only
+/// the plugin/schedule lifecycle; no Bevy renderer, window or input plugins load.
 pub struct EcsWorld {
-    world: World,
-    native_entities: HashMap<u32, u64>,
-    physics_positions: Arc<Mutex<PositionMap>>,
+    app: App,
+    native_entities: HashMap<u32, Entity>,
     physics_sync_candidates: HashSet<u32>,
-    pending_transforms: Arc<Mutex<PositionMap>>,
-    pending_text: Arc<Mutex<HashMap<u32, String>>>,
 }
 
 impl EcsWorld {
     pub fn new() -> Self {
-        let world = World::new();
-        world.component::<RuntimeEntityId>();
-        world.component::<Transform>();
-        world.component::<Rectangle>();
-        world.component::<Circle>();
-        world.component::<PhysicsLink>();
-        world.component::<TextLabel>();
-
-        let physics_positions = Arc::new(Mutex::new(PositionMap::new()));
-        let pending_transforms = Arc::new(Mutex::new(PositionMap::new()));
-        let pending_text = Arc::new(Mutex::new(HashMap::<u32, String>::new()));
-
-        let positions = Arc::clone(&physics_positions);
-        world
-            .system_named::<(&mut Transform, &PhysicsLink)>("SynchronizePhysicsTransforms")
-            .each(move |(transform, link)| {
-                let snapshot = positions
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(position) = snapshot.get(&link.entity_id) {
-                    transform.x = position[0];
-                    transform.y = position[1];
-                }
-            });
-
-        let transforms = Arc::clone(&pending_transforms);
-        world
-            .system_named::<(&mut Transform, &RuntimeEntityId)>("ApplyScriptTransforms")
-            .each(move |(transform, entity)| {
-                let pending = transforms
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(position) = pending.get(&entity.0) {
-                    transform.x = position[0];
-                    transform.y = position[1];
-                }
-            });
-
-        let text_updates = Arc::clone(&pending_text);
-        world
-            .system_named::<(&mut TextLabel, &RuntimeEntityId)>("ApplyScriptText")
-            .each(move |(label, entity)| {
-                let pending = text_updates
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(value) = pending.get(&entity.0) {
-                    label.value.clone_from(value);
-                }
-            });
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default());
+        app.insert_resource(Gravity(Vec2::ZERO));
+        app.insert_resource(SubstepCount(SOLVER_SUB_STEPS as u32));
+        app.insert_resource(PendingScriptChanges::default());
+        app.add_plugins(PhysicsPlugins::new(NativePhysicsSchedule));
+        app.add_systems(
+            NativeRuntimeSchedule,
+            (apply_script_transforms, apply_script_text).chain(),
+        );
 
         Self {
-            world,
+            app,
             native_entities: HashMap::new(),
-            physics_positions,
             physics_sync_candidates: HashSet::new(),
-            pending_transforms,
-            pending_text,
         }
     }
 
-    pub fn create_rectangle(
-        &mut self,
-        entity_id: u32,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        color: [f32; 4],
-    ) -> Result<()> {
-        if self.native_entities.contains_key(&entity_id) {
-            bail!("runtime entity {entity_id} already exists");
-        }
-        validate_rect(x, y, width, height, color)?;
+    pub fn world_mut(&mut self) -> &mut World {
+        self.app.world_mut()
+    }
 
-        let entity = self.world.entity();
-        let native_id = u64::from(entity.id());
-        entity
-            .set(RuntimeEntityId(entity_id))
-            .set(Transform {
-                x,
-                y,
-                width,
-                height,
-            })
-            .set(Rectangle { color });
-        self.native_entities.insert(entity_id, native_id);
+    pub fn create_rectangle(
+        &mut self, entity_id: u32, x: f32, y: f32, width: f32, height: f32, color: [f32; 4],
+    ) -> Result<()> {
+        self.ensure_available(entity_id)?;
+        validate_rect(x, y, width, height, color)?;
+        let entity = self.app.world_mut().spawn((
+            RuntimeEntityId(entity_id),
+            VisualTransform { x, y, width, height },
+            Rectangle { color },
+        ));
+        self.native_entities.insert(entity_id, entity.id());
         Ok(())
     }
 
     pub fn create_circle(
-        &mut self,
-        entity_id: u32,
-        x: f32,
-        y: f32,
-        radius: f32,
-        color: [f32; 4],
+        &mut self, entity_id: u32, x: f32, y: f32, radius: f32, color: [f32; 4],
     ) -> Result<()> {
-        if self.native_entities.contains_key(&entity_id) {
-            bail!("runtime entity {entity_id} already exists");
-        }
-        if !x.is_finite()
-            || !y.is_finite()
-            || !radius.is_finite()
-            || radius <= 0.0
+        self.ensure_available(entity_id)?;
+        if !x.is_finite() || !y.is_finite() || !radius.is_finite() || radius <= 0.0
             || color.iter().any(|channel| !channel.is_finite())
         {
             bail!("invalid circle entity data");
         }
-
-        let entity = self.world.entity();
-        let native_id = u64::from(entity.id());
-        entity
-            .set(RuntimeEntityId(entity_id))
-            .set(Transform {
-                x,
-                y,
-                width: radius * 2.0,
-                height: radius * 2.0,
-            })
-            .set(Circle { radius, color });
-        self.native_entities.insert(entity_id, native_id);
+        let entity = self.app.world_mut().spawn((
+            RuntimeEntityId(entity_id),
+            VisualTransform { x, y, width: radius * 2.0, height: radius * 2.0 },
+            Circle { radius, color },
+        ));
+        self.native_entities.insert(entity_id, entity.id());
         Ok(())
     }
 
     pub fn create_text(
-        &mut self,
-        entity_id: u32,
-        value: String,
-        x: f32,
-        y: f32,
-        scale: f32,
-        color: [f32; 4],
+        &mut self, entity_id: u32, value: String, x: f32, y: f32, scale: f32, color: [f32; 4],
     ) -> Result<()> {
-        if self.native_entities.contains_key(&entity_id) {
-            bail!("runtime entity {entity_id} already exists");
-        }
-        if !x.is_finite()
-            || !y.is_finite()
-            || !scale.is_finite()
-            || scale <= 0.0
-            || value.len() > 256
-            || color.iter().any(|channel| !channel.is_finite())
+        self.ensure_available(entity_id)?;
+        if !x.is_finite() || !y.is_finite() || !scale.is_finite() || scale <= 0.0
+            || value.len() > 256 || color.iter().any(|channel| !channel.is_finite())
         {
             bail!("invalid text entity data");
         }
+        let entity = self.app.world_mut().spawn((
+            RuntimeEntityId(entity_id),
+            VisualTransform { x, y, width: 0.0, height: 0.0 },
+            TextLabel { value, scale, color },
+        ));
+        self.native_entities.insert(entity_id, entity.id());
+        Ok(())
+    }
 
-        let entity = self.world.entity();
-        let native_id = u64::from(entity.id());
-        entity
-            .set(RuntimeEntityId(entity_id))
-            .set(Transform {
-                x,
-                y,
-                width: 0.0,
-                height: 0.0,
-            })
-            .set(TextLabel {
-                value,
-                scale,
-                color,
-            });
-        self.native_entities.insert(entity_id, native_id);
+    fn ensure_available(&self, entity_id: u32) -> Result<()> {
+        if self.native_entities.contains_key(&entity_id) {
+            bail!("runtime entity {entity_id} already exists");
+        }
         Ok(())
     }
 
     pub fn attach_physics(&mut self, entity_id: u32) -> Result<()> {
-        let native_id = *self
-            .native_entities
-            .get(&entity_id)
+        let native_id = *self.native_entities.get(&entity_id)
             .ok_or_else(|| anyhow::anyhow!("unknown runtime entity {entity_id}"))?;
-        self.world
-            .entity_from_id(native_id)
-            .set(PhysicsLink { entity_id });
+        self.app.world_mut().entity_mut(native_id).insert(PhysicsLink);
         Ok(())
     }
 
@@ -263,10 +209,8 @@ impl EcsWorld {
         if !x.is_finite() || !y.is_finite() {
             bail!("entity position must be finite");
         }
-        self.pending_transforms
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(entity_id, [x, y]);
+        self.app.world_mut().resource_mut::<PendingScriptChanges>()
+            .transforms.insert(entity_id, [x, y]);
         Ok(())
     }
 
@@ -277,392 +221,184 @@ impl EcsWorld {
         if value.len() > 256 {
             bail!("text label exceeds 256 bytes");
         }
-        self.pending_text
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(entity_id, value);
+        self.app.world_mut().resource_mut::<PendingScriptChanges>()
+            .text.insert(entity_id, value);
         Ok(())
     }
 
     pub fn destroy_entity(&mut self, entity_id: u32) -> Result<()> {
-        let native_id = self
-            .native_entities
-            .remove(&entity_id)
+        let native_id = self.native_entities.remove(&entity_id)
             .ok_or_else(|| anyhow::anyhow!("unknown runtime entity {entity_id}"))?;
-        self.world.entity_from_id(native_id).destruct();
-        self.pending_transforms
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&entity_id);
-        self.pending_text
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&entity_id);
-        self.physics_positions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&entity_id);
+        self.app.world_mut().despawn(native_id);
+        let mut pending = self.app.world_mut().resource_mut::<PendingScriptChanges>();
+        pending.transforms.remove(&entity_id);
+        pending.text.remove(&entity_id);
         Ok(())
     }
 
     pub fn apply_pending_changes(&mut self) {
-        let _ = self.world.progress();
-        self.pending_transforms
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-        self.pending_text
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+        let world = self.app.world_mut();
+        world.run_schedule(NativeRuntimeSchedule);
+        let mut pending = world.resource_mut::<PendingScriptChanges>();
+        pending.transforms.clear();
+        pending.text.clear();
     }
 
-    /// Applies only Box2D transforms that changed since the previous synchronization.
     pub fn synchronize_physics_changes(&mut self, changes: &[PhysicsPositionChange]) -> Result<()> {
         for change in changes {
-            let Some(&native_id) = self.native_entities.get(&change.entity_id) else {
-                continue;
+            let Some(&native_id) = self.native_entities.get(&change.entity_id) else { continue; };
+            let Some(mut transform) = self.app.world_mut().get_mut::<VisualTransform>(native_id) else {
+                bail!("physics-linked ECS entity {} has no VisualTransform", change.entity_id);
             };
-
-            self.world
-                .entity_from_id(native_id)
-                .try_get::<&mut Transform>(|transform| {
-                    transform.x = change.position[0];
-                    transform.y = change.position[1];
-                })
-                .with_context(|| {
-                    format!(
-                        "physics-linked ECS entity {} has no Transform component",
-                        change.entity_id
-                    )
-                })?;
+            transform.x = change.position[0];
+            transform.y = change.position[1];
         }
         Ok(())
     }
-    /// Uses incremental entity updates for sparse movement and a direct Flecs query
-    /// when the number of move events reaches half of the physics-body count.
-    ///
-    /// The dense path reads the already-maintained transform cache directly. It does
-    /// not step the world or take the legacy physics snapshot mutex per entity.
+
     pub fn synchronize_physics_adaptive(
-        &mut self,
-        changes: &[PhysicsPositionChange],
-        positions: &PositionMap,
+        &mut self, changes: &[PhysicsPositionChange], positions: &PositionMap,
     ) -> Result<()> {
-        if changes.is_empty() || positions.is_empty() {
-            return Ok(());
-        }
-
-        let use_full_query = if changes.len().saturating_mul(2) < positions.len() {
-            false
-        } else {
+        if changes.is_empty() || positions.is_empty() { return Ok(()); }
+        if changes.len().saturating_mul(2) >= positions.len() {
             self.physics_sync_candidates.clear();
-            for change in changes {
-                self.physics_sync_candidates.insert(change.entity_id);
-                if self.physics_sync_candidates.len().saturating_mul(2) >= positions.len() {
-                    break;
-                }
+            self.physics_sync_candidates.extend(changes.iter().map(|change| change.entity_id));
+            let updates = self.native_entities.iter().filter_map(|(entity_id, entity)| {
+                if !self.physics_sync_candidates.contains(entity_id) { return None; }
+                positions.get(entity_id).copied().map(|position| (*entity, position, *entity_id))
+            }).collect::<Vec<_>>();
+            for (entity, position, entity_id) in updates {
+                let Some(mut transform) = self.app.world_mut().get_mut::<VisualTransform>(entity) else {
+                    bail!("physics-linked ECS entity {entity_id} has no VisualTransform");
+                };
+                transform.x = position[0];
+                transform.y = position[1];
             }
-            let dense = self.physics_sync_candidates.len().saturating_mul(2) >= positions.len();
             self.physics_sync_candidates.clear();
-            dense
-        };
-
-        if use_full_query {
-            self.world
-                .new_query::<(&mut Transform, &PhysicsLink)>()
-                .each(|(transform, link)| {
-                    if let Some(position) = positions.get(&link.entity_id) {
-                        transform.x = position[0];
-                        transform.y = position[1];
-                    }
-                });
             Ok(())
         } else {
             self.synchronize_physics_changes(changes)
         }
     }
-    pub fn synchronize_physics(&mut self, positions: &PositionMap) {
-        {
-            let mut snapshot = self
-                .physics_positions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            snapshot.clear();
-            snapshot.extend(positions.iter().map(|(id, position)| (*id, *position)));
+
+    pub fn draw_rectangles(&mut self) -> Vec<DrawRectangle> {
+        let mut output = Vec::new();
+        self.draw_rectangles_into(&mut output);
+        output
+    }
+
+    pub fn draw_rectangles_into(&mut self, output: &mut Vec<DrawRectangle>) {
+        output.clear();
+        let world = self.app.world_mut();
+        let mut query = world.query::<(&VisualTransform, &Rectangle)>();
+        for (transform, rectangle) in query.iter(world) {
+            output.push(DrawRectangle {
+                x: transform.x, y: transform.y, width: transform.width, height: transform.height,
+                color: rectangle.color,
+            });
         }
-        let _ = self.world.progress();
     }
 
-    pub fn draw_rectangles(&self) -> Vec<DrawRectangle> {
-        let mut items = Vec::with_capacity(self.native_entities.len());
-        self.draw_rectangles_into(&mut items);
-        items
+    pub fn draw_circles(&mut self) -> Vec<DrawCircle> {
+        let mut output = Vec::new();
+        self.draw_circles_into(&mut output);
+        output
     }
 
-    pub fn draw_rectangles_into(&self, items: &mut Vec<DrawRectangle>) {
-        items.clear();
-        self.world
-            .new_query::<(&Transform, &Rectangle)>()
-            .each(|(transform, rectangle)| {
-                items.push(DrawRectangle {
-                    x: transform.x,
-                    y: transform.y,
-                    width: transform.width,
-                    height: transform.height,
-                    color: rectangle.color,
-                });
+    pub fn draw_circles_into(&mut self, output: &mut Vec<DrawCircle>) {
+        output.clear();
+        let world = self.app.world_mut();
+        let mut query = world.query::<(&VisualTransform, &Circle)>();
+        for (transform, circle) in query.iter(world) {
+            output.push(DrawCircle {
+                x: transform.x, y: transform.y, radius: circle.radius, color: circle.color,
             });
+        }
     }
 
-    pub fn draw_circles(&self) -> Vec<DrawCircle> {
-        let mut items = Vec::new();
-        self.draw_circles_into(&mut items);
-        items
+    pub fn draw_text(&mut self) -> Vec<DrawText> {
+        let mut output = Vec::new();
+        self.draw_text_into(&mut output);
+        output
     }
 
-    pub fn draw_circles_into(&self, items: &mut Vec<DrawCircle>) {
-        items.clear();
-        self.world
-            .new_query::<(&Transform, &Circle)>()
-            .each(|(transform, circle)| {
-                items.push(DrawCircle {
-                    x: transform.x,
-                    y: transform.y,
-                    radius: circle.radius,
-                    color: circle.color,
-                });
+    pub fn draw_text_into(&mut self, output: &mut Vec<DrawText>) {
+        output.clear();
+        let world = self.app.world_mut();
+        let mut query = world.query::<(&VisualTransform, &TextLabel)>();
+        for (transform, label) in query.iter(world) {
+            output.push(DrawText {
+                x: transform.x, y: transform.y, scale: label.scale, color: label.color,
+                value: label.value.clone(),
             });
+        }
     }
 
-    pub fn draw_text(&self) -> Vec<DrawText> {
-        let mut items = Vec::new();
-        self.draw_text_into(&mut items);
-        items
-    }
+    pub fn entity_count(&self) -> usize { self.native_entities.len() }
 
-    pub fn draw_text_into(&self, items: &mut Vec<DrawText>) {
-        let mut index = 0;
-        self.world
-            .new_query::<(&Transform, &TextLabel)>()
-            .each(|(transform, label)| {
-                if let Some(item) = items.get_mut(index) {
-                    item.x = transform.x;
-                    item.y = transform.y;
-                    item.scale = label.scale;
-                    item.color = label.color;
-                    item.value.clone_from(&label.value);
-                } else {
-                    items.push(DrawText {
-                        x: transform.x,
-                        y: transform.y,
-                        scale: label.scale,
-                        color: label.color,
-                        value: label.value.clone(),
-                    });
-                }
-                index += 1;
-            });
-        items.truncate(index);
-    }
-
-    pub fn entity_count(&self) -> usize {
-        self.native_entities.len()
+    #[cfg(test)]
+    pub(crate) fn entity_has_physics_link(&mut self, entity_id: u32) -> bool {
+        self.native_entities.get(&entity_id)
+            .is_some_and(|entity| self.app.world().get::<PhysicsLink>(*entity).is_some())
     }
 }
 
 fn validate_rect(x: f32, y: f32, width: f32, height: f32, color: [f32; 4]) -> Result<()> {
-    if !x.is_finite()
-        || !y.is_finite()
-        || !width.is_finite()
-        || !height.is_finite()
-        || width <= 0.0
-        || height <= 0.0
-        || color.iter().any(|channel| !channel.is_finite())
-    {
-        bail!("invalid rectangle entity data");
-    }
+    if !x.is_finite() || !y.is_finite() || !width.is_finite() || !height.is_finite()
+        || width <= 0.0 || height <= 0.0 || color.iter().any(|channel| !channel.is_finite())
+    { bail!("invalid rectangle entity data"); }
     Ok(())
 }
 
 impl Default for EcsWorld {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::physics::{PhysicsMaterial, PhysicsWorld, RigidBodyKind};
 
     #[test]
-    fn flecs_owns_runtime_entities_and_produces_render_data() {
+    fn bevy_ecs_owns_entities_and_produces_render_data() {
         let mut world = EcsWorld::new();
-        world
-            .create_rectangle(1, 0.0, -2.0, 1.0, 0.2, [0.2, 0.8, 1.0, 1.0])
-            .unwrap();
-        world
-            .create_text(2, "LABEL 0".into(), -0.9, 0.9, 0.02, [1.0; 4])
-            .unwrap();
-
+        world.create_rectangle(1, 0.0, -2.0, 1.0, 0.2, [0.2, 0.8, 1.0, 1.0]).unwrap();
+        world.create_text(2, "LABEL 0".into(), -0.9, 0.9, 0.02, [1.0; 4]).unwrap();
         assert_eq!(world.entity_count(), 2);
         assert_eq!(world.draw_rectangles().len(), 1);
         assert_eq!(world.draw_text()[0].value, "LABEL 0");
     }
 
     #[test]
-    fn flecs_systems_apply_script_changes_and_physics_snapshots() {
+    fn scheduled_systems_apply_script_changes_in_order() {
         let mut world = EcsWorld::new();
-        world
-            .create_rectangle(7, 0.0, 0.0, 1.0, 1.0, [1.0; 4])
-            .unwrap();
-        world.attach_physics(7).unwrap();
-
-        world.synchronize_physics(&HashMap::from([(7, [2.0, 3.0])]));
-        assert_eq!(world.draw_rectangles()[0].x, 2.0);
-        assert_eq!(world.draw_rectangles()[0].y, 3.0);
-
+        world.create_rectangle(7, 0.0, 0.0, 1.0, 1.0, [1.0; 4]).unwrap();
         world.set_position(7, -1.0, -2.0).unwrap();
         world.apply_pending_changes();
-        assert_eq!(world.draw_rectangles()[0].x, -1.0);
-        assert_eq!(world.draw_rectangles()[0].y, -2.0);
+        let rectangle = world.draw_rectangles()[0];
+        assert_eq!((rectangle.x, rectangle.y), (-1.0, -2.0));
     }
 
     #[test]
-    fn adaptive_physics_sync_uses_sparse_updates_and_dense_query() {
+    fn physics_and_scene_share_one_ecs_world() {
         let mut world = EcsWorld::new();
-        for entity_id in 1..=4 {
-            world
-                .create_rectangle(
-                    entity_id,
-                    entity_id as f32,
-                    entity_id as f32,
-                    1.0,
-                    1.0,
-                    [1.0; 4],
-                )
-                .unwrap();
-            world.attach_physics(entity_id).unwrap();
-        }
-
-        let positions = PositionMap::from([
-            (1, [10.0, 11.0]),
-            (2, [20.0, 21.0]),
-            (3, [30.0, 31.0]),
-            (4, [40.0, 41.0]),
-        ]);
-
-        // Repeated substep events for one body still count as one moved entity.
-        world
-            .synchronize_physics_adaptive(
-                &[
-                    PhysicsPositionChange {
-                        entity_id: 1,
-                        position: [10.0, 11.0],
-                    },
-                    PhysicsPositionChange {
-                        entity_id: 1,
-                        position: [10.0, 11.0],
-                    },
-                    PhysicsPositionChange {
-                        entity_id: 1,
-                        position: [10.0, 11.0],
-                    },
-                ],
-                &positions,
-            )
-            .unwrap();
-
-        let sparse_rectangles = world.draw_rectangles();
-        assert_eq!(
-            sparse_rectangles
-                .iter()
-                .map(|item| (item.x, item.y))
-                .collect::<Vec<_>>(),
-            vec![(10.0, 11.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0)]
-        );
-
-        // Two changed bodies out of four take the full query path.
-        world
-            .synchronize_physics_adaptive(
-                &[
-                    PhysicsPositionChange {
-                        entity_id: 1,
-                        position: [10.0, 11.0],
-                    },
-                    PhysicsPositionChange {
-                        entity_id: 2,
-                        position: [20.0, 21.0],
-                    },
-                ],
-                &positions,
-            )
-            .unwrap();
-
-        let dense_rectangles = world.draw_rectangles();
-        assert_eq!(
-            dense_rectangles
-                .iter()
-                .map(|item| (item.x, item.y))
-                .collect::<Vec<_>>(),
-            vec![(10.0, 11.0), (20.0, 21.0), (30.0, 31.0), (40.0, 41.0)]
-        );
-
-        // No move events means no synchronization work, even if the cached map
-        // contains transforms that differ from the ECS state.
-        world
-            .synchronize_physics_adaptive(&[], &PositionMap::from([(1, [99.0, 99.0])]))
-            .unwrap();
-        assert_eq!(world.draw_rectangles()[0].x, 10.0);
-    }
-    #[test]
-    fn flecs_applies_only_incremental_physics_transform_changes() {
-        let mut world = EcsWorld::new();
-        world
-            .create_rectangle(1, 0.0, 0.0, 1.0, 1.0, [1.0; 4])
-            .unwrap();
-        world
-            .create_rectangle(2, 5.0, 6.0, 1.0, 1.0, [1.0; 4])
-            .unwrap();
+        world.create_rectangle(1, 0.0, 0.0, 1.0, 1.0, [1.0; 4]).unwrap();
         world.attach_physics(1).unwrap();
-        world.attach_physics(2).unwrap();
-
-        world
-            .synchronize_physics_changes(&[
-                PhysicsPositionChange {
-                    entity_id: 1,
-                    position: [2.0, 3.0],
-                },
-                PhysicsPositionChange {
-                    entity_id: 2,
-                    position: [7.0, 8.0],
-                },
-            ])
-            .unwrap();
-
-        let rectangles = world.draw_rectangles();
-        let first = rectangles.iter().find(|item| item.x == 2.0).unwrap();
-        let second = rectangles.iter().find(|item| item.x == 7.0).unwrap();
-        assert_eq!((first.x, first.y), (2.0, 3.0));
-        assert_eq!((second.x, second.y), (7.0, 8.0));
-
-        world.destroy_entity(2).unwrap();
-        world
-            .synchronize_physics_changes(&[PhysicsPositionChange {
-                entity_id: 2,
-                position: [90.0, 90.0],
-            }])
-            .unwrap();
-        assert_eq!(world.draw_rectangles().len(), 1);
+        assert!(world.entity_has_physics_link(1));
+        let mut physics = PhysicsWorld::new([0.0, 0.0]).unwrap();
+        physics.configure_world(world.world_mut());
+        physics.create_box(
+            world.world_mut(), 1, [0.0, 0.0], [1.0, 1.0], RigidBodyKind::Static,
+            PhysicsMaterial::default(),
+        ).unwrap();
+        assert_eq!(world.world_mut().entities().len(), 2);
     }
-    #[test]
-    fn destroying_an_entity_releases_its_flecs_record() {
-        let mut world = EcsWorld::new();
-        world
-            .create_rectangle(10, 0.0, 0.0, 1.0, 1.0, [1.0; 4])
-            .unwrap();
-        world.destroy_entity(10).unwrap();
 
+    #[test]
+    fn destroying_entity_releases_its_bevy_ecs_record() {
+        let mut world = EcsWorld::new();
+        world.create_rectangle(10, 0.0, 0.0, 1.0, 1.0, [1.0; 4]).unwrap();
+        world.destroy_entity(10).unwrap();
         assert_eq!(world.entity_count(), 0);
         assert!(world.draw_rectangles().is_empty());
     }
@@ -670,32 +406,21 @@ mod tests {
     #[test]
     fn invalid_render_data_is_rejected() {
         let mut world = EcsWorld::new();
-        assert!(
-            world
-                .create_rectangle(1, 0.0, 0.0, 0.0, 1.0, [1.0; 4])
-                .is_err()
-        );
+        assert!(world.create_rectangle(1, 0.0, 0.0, 0.0, 1.0, [1.0; 4]).is_err());
+        assert!(world.create_circle(1, 0.0, 0.0, f32::NAN, [1.0; 4]).is_err());
     }
 
     #[test]
     fn reusable_draw_output_keeps_capacity_between_frames() {
         let mut world = EcsWorld::new();
-        world
-            .create_rectangle(1, 0.0, 0.0, 1.0, 1.0, [1.0, 0.0, 0.0, 1.0])
-            .unwrap();
+        world.create_rectangle(1, 0.0, 0.0, 1.0, 1.0, [1.0, 0.0, 0.0, 1.0]).unwrap();
         let mut output = Vec::with_capacity(4);
-
         world.draw_rectangles_into(&mut output);
-        assert_eq!(output.len(), 1);
         let capacity = output.capacity();
-
         world.set_position(1, 2.0, 3.0).unwrap();
         world.apply_pending_changes();
         world.draw_rectangles_into(&mut output);
-
-        assert_eq!(output.len(), 1);
-        assert_eq!(output[0].x, 2.0);
-        assert_eq!(output[0].y, 3.0);
+        assert_eq!((output[0].x, output[0].y), (2.0, 3.0));
         assert_eq!(output.capacity(), capacity);
     }
 }

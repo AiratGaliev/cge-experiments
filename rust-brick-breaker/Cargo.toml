@@ -4,19 +4,23 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
 publish = false
-description = "Scripting-first native 2D runtime using SDL3, wgpu, Flecs, Box2D v3, miniaudio and QuickJS-NG"
+description = "Scripting-first native 2D runtime using winit, wgpu, Bevy ECS, Avian 2D, gilrs, miniaudio and QuickJS-NG"
 
 [dependencies]
 anyhow = "=1.0.100"
-boxdd = "=0.6.0"
+avian2d = { version = "=0.8.0", default-features = false, features = ["2d", "parry-f32"] }
+bevy_app = { version = "=0.20.1", default-features = false, features = ["std"] }
+bevy_ecs = { version = "=0.20.1", default-features = false, features = ["std"] }
+bevy_math = { version = "=0.20.1", default-features = false, features = ["std"] }
+bevy_time = { version = "=0.20.1", default-features = false, features = ["std"] }
 bytemuck = { version = "=1.25.0", features = ["derive"] }
 crossbeam-queue = "=0.3.12"
-flecs_ecs = "=0.2.2"
+gilrs = "=0.11.2"
 maudio = { version = "=0.1.15", default-features = false, features = ["engine"] }
 pollster = "=0.4.0"
 rquickjs = { version = "=0.14.0", features = ["std"] }
-sdl3 = { version = "=0.22.1", features = ["build-from-source", "raw-window-handle"] }
 wgpu = "=30.0.1"
+winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland"] }
 
 [dev-dependencies]
 criterion = "=0.8.2"

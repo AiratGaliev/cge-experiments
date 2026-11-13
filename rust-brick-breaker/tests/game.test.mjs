@@ -14,6 +14,12 @@ function createGame() {
     let scriptCollisions = [];
     const keysDown = new Set();
     const keysPressed = new Set();
+    const gamepadState = {
+        connected: false,
+        leftStickX: 0,
+        down: new Set(),
+        pressed: new Set(),
+    };
 
     const engine = {
         entities: {
@@ -92,6 +98,20 @@ function createGame() {
             wasPressed(key) {
                 return keysPressed.has(key);
             },
+            gamepad: {
+                connected() {
+                    return gamepadState.connected;
+                },
+                leftStickX() {
+                    return gamepadState.leftStickX;
+                },
+                isDown(button) {
+                    return gamepadState.down.has(button);
+                },
+                wasPressed(button) {
+                    return gamepadState.pressed.has(button);
+                },
+            },
         },
         audio: {
             playTone(frequency, durationSeconds, volume) {
@@ -117,6 +137,7 @@ function createGame() {
         tones,
         keysDown,
         keysPressed,
+        gamepadState,
         setCollisions(value) {
             collisions = value;
         },
@@ -305,4 +326,50 @@ test("three lost balls enter Game Over in the TypeScript game state machine", ()
 
     assert.equal(findLabel(entities, "LIVES"), "LIVES 0");
     assert.equal(findLabel(entities, "GAME OVER"), "GAME OVER");
+});
+
+test("Gamepad South launches the ball through the typed host input API", () => {
+    const { game, engine, bodies, gamepadState } = createGame();
+    const [ballId] = findBall(bodies);
+
+    gamepadState.connected = true;
+    gamepadState.pressed.add("South");
+    game.update(engine);
+    assert.deepEqual(bodies.get(ballId).velocity, [3.2, 5]);
+
+    gamepadState.pressed.clear();
+    game.update(engine);
+    assert.deepEqual(bodies.get(ballId).velocity, [3.2, 5]);
+});
+
+test("Left Stick X controls paddle velocity as an analog value", () => {
+    const { game, engine, bodies, keysPressed, gamepadState } = createGame();
+    const [paddleId] = findPaddle(bodies);
+
+    keysPressed.add("Space");
+    game.update(engine);
+    keysPressed.clear();
+
+    gamepadState.connected = true;
+    gamepadState.leftStickX = 0.5;
+    game.update(engine);
+    assert.deepEqual(bodies.get(paddleId).velocity, [4, 0]);
+});
+
+test("Gamepad D-pad controls the paddle and combines predictably with keyboard input", () => {
+    const { game, engine, bodies, keysPressed, keysDown, gamepadState } = createGame();
+    const [paddleId] = findPaddle(bodies);
+
+    keysPressed.add("Space");
+    game.update(engine);
+    keysPressed.clear();
+
+    gamepadState.connected = true;
+    gamepadState.down.add("DPadLeft");
+    game.update(engine);
+    assert.deepEqual(bodies.get(paddleId).velocity, [-8, 0]);
+
+    keysDown.add("D");
+    game.update(engine);
+    assert.deepEqual(bodies.get(paddleId).velocity, [0, 0]);
 });

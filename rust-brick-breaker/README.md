@@ -1,49 +1,50 @@
 # Codogma Native 2D Runtime — CGE Experiments
 
-A minimal, scripting-first native 2D engine vertical slice. It uses Rust and a set of focused native libraries for platform, rendering, ECS, physics and audio, while the sample game is authored in TypeScript and executed by embedded QuickJS-NG.
+A minimal, scripting-first native 2D engine vertical slice. Rust owns the platform lifecycle, GPU rendering, ECS, physics and audio; the sample game is authored in TypeScript and executed by embedded QuickJS-NG.
 
-**Brick Breaker is the sample game, not the engine implementation.** Its entities, game rules, collision reactions, score, lives, victory/game-over states and restart flow live in `scripts/game.ts`. Rust provides reusable runtime services and does not contain Brick Breaker-specific gameplay.
+**Brick Breaker is the sample game, not the engine implementation.** Entities, game rules, collision reactions, score, lives, victory/game-over states and restart flow live in `scripts/game.ts`. Rust provides reusable runtime services and does not contain Brick Breaker-specific gameplay.
 
-This experiment is intentionally independent of the production Codogma Engine repository. It is a technical foundation study, not a Cocos Creator 4 replacement or a production-ready engine.
+This experiment is independent of the production Codogma Engine repository. It is a technical foundation study, not a Cocos Creator 4 replacement or a production-ready engine.
 
 ## What this slice provides
 
-- **SDL3** — native window, keyboard events, focus and resize lifecycle.
+- **winit 0.30** — native desktop window, event-driven lifecycle, physical keyboard input, focus and resize handling.
+- **gilrs 0.11** — controller discovery and hotplug, standardized button/axis state, deterministic active-controller selection and keyboard fallback.
 - **wgpu 30** — native GPU surface and a small 2D pipeline for colored rectangles, circles and bitmap text. The virtual world keeps a 4:3 aspect ratio; wider and taller windows are letterboxed instead of stretching game geometry.
-- **Flecs** — runtime entities/components, structural updates and physics-to-transform synchronization.
-- **Box2D v3** through `boxdd` — dynamic/static/kinematic bodies, box/circle colliders, fixed-step simulation and contact events.
+- **bevy_ecs 0.20** — standalone ECS entities, components, resources, queries and explicit runtime systems/schedules.
+- **Avian 2D 0.8** — 2D rigid bodies, colliders, material properties, continuous collision detection and collision messages, integrated into the same ECS world.
 - **miniaudio** through `maudio` — native playback device and a bounded lock-free PCM queue.
 - **QuickJS-NG** through `rquickjs` — embedded JavaScript execution inside the Rust process.
-- **TypeScript 5.9.3** — the source language for the complete Brick Breaker sample. Node.js is only used to typecheck, compile and test it.
+- **TypeScript 5.9.3** — source language for the complete Brick Breaker sample. Node.js is only used to typecheck, compile and test it.
 
 ## Runtime architecture
 
 ```text
-SDL3 window / keyboard / OS events
-                |
-                v
-         Rust Runtime loop
-        fixed-step scheduling
-                |
-                v
-       QuickJS-NG game hooks <-------- assets/game.js
-                |                       compiled from
-          typed Host API                scripts/game.ts
-                |
-        queued runtime commands
-          /       |        \
-         v        v         v
-     Flecs ECS  Box2D v3  miniaudio
-         |        |         ^
-         |   collision      |
-         |     events       |
-         |        |         |
-         +--------+-----> QuickJS game rules
-         |
-         +---- render data ----> wgpu pipeline
+winit window / OS events -------> Rust Runtime event loop <------ gilrs gamepad
+                                         |
+                                  fixed-step accumulator
+                                         |
+                           QuickJS-NG game hooks <------ assets/game.js
+                                         |                 compiled from
+                                   typed Host API          scripts/game.ts
+                                         |
+                                  queued commands
+                                   /     |      \
+                                  v      v       v
+                              bevy_ecs  Avian 2D  miniaudio
+                                  |      |
+                                  |  collision messages
+                                  |      |
+                                  +------+-----> QuickJS game rules
+                                  |
+                                  +---- render data ----> wgpu pipeline
 ```
 
-The runtime owns the platform loop and native resources. JavaScript never receives raw Rust pointers, Flecs handles, Box2D handles, SDL objects or wgpu resources. Host bindings decode typed JavaScript values, while native ECS, physics and audio boundaries validate their inputs before applying them. Structural and physics commands are queued and applied outside the Box2D step.
+The runtime owns the platform loop and native resources. winit handles window lifecycle and keyboard events; gilrs is polled from the runtime update and never calls game logic from device callbacks. The ECS and Avian physics backend use one Bevy ECS world. Physics has its own explicit schedule and is advanced only by the runtime's fixed-step accumulator. JavaScript never receives Rust pointers, ECS entities, physics handles, gamepad handles, native window objects or wgpu resources. Host bindings decode typed values, and native boundaries validate inputs before applying them.
+
+### Bevy dependency boundary
+
+The project directly uses the standalone `bevy_ecs`, `bevy_app`, `bevy_math` and `bevy_time` crates. Avian 2D 0.8 currently depends on the Bevy facade crate with default features disabled and only its minimal standard-library/logging features enabled. That facade is therefore present transitively in Cargo's dependency graph, but this project does not enable or use Bevy's renderer, windowing, input, asset, audio or full game-engine stack. winit, wgpu, gilrs and miniaudio remain the runtime's respective platform, rendering, controller and audio services.
 
 ### TypeScript game lifecycle
 
@@ -62,10 +63,19 @@ The embedded script receives one global `engine` object.
 | API | Current contract |
 |---|---|
 | `engine.entities` | Create rectangle/circle/text entities; set visual position/text; read physics-synchronized X/Y; destroy an entity. |
-| `engine.physics` | Create box/circle bodies; set velocity/position; destroy a body; query the current frame's collision entity pairs. Repeated count and entity lookups are non-consuming within the frame. |
-| `engine.input` | Query held and just-pressed keyboard keys using platform-neutral names. |
+| `engine.physics` | Create box/circle bodies; set velocity/position; destroy a body; query the current frame's collision entity pairs. |
+| `engine.input` | Query held and just-pressed keyboard keys using platform-neutral names; read gamepad connection, normalized Left Stick X and held/just-pressed South/D-pad buttons. |
 | `engine.time` | Read the current frame delta in seconds. |
 | `engine.audio` | Queue a synthesized tone by frequency, duration and volume. `playTone()` returns `true` only when the complete tone fits in the bounded sample queue. |
+
+The gamepad Host API is intentionally small and platform-neutral:
+
+- `engine.input.gamepad.connected()`
+- `engine.input.gamepad.leftStickX()` — normalized to `[-1, 1]` after the 0.18 deadzone.
+- `engine.input.gamepad.isDown("South" | "DPadLeft" | "DPadRight")`
+- `engine.input.gamepad.wasPressed("South" | "DPadLeft" | "DPadRight")`
+
+No gilrs handles or native pointers cross the QuickJS boundary.
 
 Entity creation and body creation are separate operations: create the visual ECS entity first, then attach a physics body using its runtime entity ID. Destroying an entity through the entity API also destroys its attached physics body. The API deliberately exposes capabilities rather than implementation objects.
 
@@ -79,21 +89,21 @@ Run all commands from `rust-brick-breaker/`.
 
 - Windows 10/11 x64.
 - Visual Studio 2022 Build Tools with the Desktop development with C++ workload and Windows SDK.
-- LLVM/Clang (`libclang` is required by the Flecs Rust binding's bindgen build step), CMake and Git available on PATH.
+- CMake and Git available on PATH.
 - Rust stable toolchain 1.97.0 or newer, with the MSVC target.
 - Node.js 22.x and npm.
 - A working GPU driver with a D3D12 or Vulkan-capable adapter.
+- A gamepad is optional; keyboard input remains available when no controller is connected or gilrs initialization fails.
 
 #### Linux x64
 
 - Ubuntu 24.04 or a compatible distribution.
-- C/C++ compiler, linker, CMake, Ninja, pkg-config, Git and libclang development files, including X11 XTest (`libxtst-dev`).
-- SDL3 build dependencies: X11, Wayland, XKB, EGL/OpenGL, DRM/GBM, udev, ALSA, PulseAudio and PipeWire development packages. The CI workflow installs the corresponding Ubuntu packages.
+- C/C++ compiler, linker, CMake, Ninja, pkg-config and Git.
+- Development packages for Vulkan, ALSA, PulseAudio, PipeWire, udev, DBus, Wayland, XKB, X11 and the selected GPU driver. CI installs the corresponding Ubuntu packages; `libudev-dev` is required by gilrs.
+- Permission to read the relevant `/dev/input/event*` devices for gamepad access. Without a usable controller or device permission the application still starts with keyboard input.
 - Rust stable toolchain 1.97.0 or newer.
 - Node.js 22.x and npm.
-- A working Vulkan or OpenGL-capable GPU driver and a desktop session for interactive execution.
-
-SDL3 is built from source through the crate's `build-from-source` feature. `maudio` uses pregenerated bindings for Windows x64 and Linux x64, so it does not require a second bindgen version.
+- A desktop session and a working Vulkan or OpenGL-capable GPU driver for interactive presentation.
 
 ### Install, validate, build and launch
 
@@ -121,35 +131,45 @@ cargo run --locked
 
 ## Sample game: Brick Breaker
 
-- A / D or Left / Right Arrow — move the paddle.
-- Space — launch the ball; restart after Victory or Game Over.
-- Escape — exit.
+| Input | Action |
+|---|---|
+| A / D or Left / Right Arrow | Move the paddle |
+| Space | Launch the ball; restart after Victory or Game Over |
+| Gamepad Left Stick X | Analog paddle movement |
+| Gamepad D-pad Left / Right | Digital paddle movement |
+| Gamepad South | Launch the ball; restart after Victory or Game Over |
+| Escape | Exit |
 
-The TypeScript sample creates 36 bricks, walls, a paddle, a ball and HUD labels. Box2D produces contacts; the JavaScript game interprets those events, removes brick entities, awards score, tracks lives and chooses victory/game-over state. The Rust runtime has no Brick Breaker-specific collision roles, score counter or state machine.
+Keyboard and controller directions are combined and clamped to the paddle's movement range. The active controller is the connected device with the lexicographically smallest hardware UUID, making selection independent of device enumeration and event arrival order. Disconnecting the active controller clears its held and edge-triggered state; the next eligible connected controller may become active. The South button uses just-pressed semantics so a held button does not repeatedly launch or restart the game.
+
+The TypeScript sample creates 36 bricks, walls, a paddle, a ball and HUD labels. Avian 2D produces collision messages; the JavaScript game interprets those events, removes brick entities, awards score, tracks lives and chooses victory/game-over state. The Rust runtime has no Brick Breaker-specific collision roles, score counter or state machine.
 
 ## Current limitations
 
-This is intentionally a small engine foundation, not Cocos Creator 4 feature parity. The bitmap font currently covers uppercase ASCII letters and digits. The virtual world uses a fixed 4:3 aspect ratio with letterboxing, not a general camera system. QuickJS currently has no per-hook execution deadline or explicit heap quota; scripts run on the main thread, so only trusted game scripts should be loaded because a runaway callback can block the runtime. It currently has no sprite/texture or asset importer, camera system, animation/tween system, audio asset decoding, UI toolkit, scene serialization/loader, prefab workflow, scripting debugger, hot reload, editor, package manager, save system, gamepad, networking, mobile/WASM target or distribution packaging.
+This is intentionally a small engine foundation, not Cocos Creator 4 feature parity. The bitmap font currently covers uppercase ASCII letters and digits. The virtual world uses a fixed 4:3 aspect ratio with letterboxing, not a general camera system. QuickJS currently has no per-hook execution deadline or explicit heap quota; scripts run on the main thread, so only trusted game scripts should be loaded because a runaway callback can block the runtime. It currently has no sprite/texture or asset importer, camera system, animation/tween system, audio asset decoding, UI toolkit, scene serialization/loader, prefab workflow, scripting debugger, hot reload, editor, package manager, save system, networking, mobile/WASM target or distribution packaging.
 
-The renderer currently supports colored rectangles, circles and a small built-in bitmap font. Audio currently exposes synthesized tones rather than loading sound assets. The physics facade currently exposes Box2D box/circle rigid bodies. These are explicit limits of the first vertical slice, not implied future capabilities.
+The renderer currently supports colored rectangles, circles and a small built-in bitmap font. Audio currently exposes synthesized tones rather than loading sound assets. The physics facade currently exposes Avian 2D box/circle colliders and rigid bodies.
 
 ## Pinned stack and upstream provenance
 
 | Technology | Pinned version | Role | License / source |
 |---|---:|---|---|
 | Rust | 1.97.0 CI toolchain | Runtime and native integration | Apache-2.0 OR MIT |
-| SDL3 Rust crate | 0.22.1 | Window, events and keyboard input | MIT crate; SDL3 source: Zlib |
+| winit | 0.30.13 | Window and platform event lifecycle | Apache-2.0 OR MIT |
+| gilrs | 0.11.2 | Standardized gamepad input and hotplug | Apache-2.0 OR MIT |
 | wgpu | 30.0.1 | GPU surface and 2D render pipeline | MIT OR Apache-2.0 |
-| flecs_ecs | 0.2.2 | ECS entities, components and systems | MIT |
-| boxdd | 0.6.0 | Safe Rust API over official Box2D v3 C API | MIT OR Apache-2.0 |
-| Box2D | 3.2.0 | Native rigid-body simulation vendored by boxdd-sys | MIT |
+| bevy_ecs | 0.20.1 | Standalone ECS entities, components and systems | MIT OR Apache-2.0 |
+| bevy_app | 0.20.1 | Minimal plugin and schedule host | MIT OR Apache-2.0 |
+| bevy_math / bevy_time | 0.20.1 | Math and fixed-step clock resources | MIT OR Apache-2.0 |
+| avian2d | 0.8.0 | 2D rigid-body physics and collision detection | MIT OR Apache-2.0 |
 | maudio | 0.1.15 | Safe Rust API and playback device over miniaudio | MIT |
-| miniaudio | 0.11.23 | Native audio engine embedded by maudio-sys | Unlicense OR MIT No Attribution |
+| miniaudio | 0.11.23 | Native audio engine embedded by maudio | Unlicense OR MIT No Attribution |
 | rquickjs | 0.14.0 | Rust bindings to QuickJS-NG | MIT |
 | QuickJS-NG | commit `0fdea21ff1090084e91dad812b343d92e79ba9d9` | Embedded ES2020 JavaScript runtime | MIT |
 | TypeScript | 5.9.3 | Game source language | Apache-2.0 |
+| Criterion | 0.8.2 | Runtime microbenchmarks | Apache-2.0 OR MIT |
 
-Box2D binding: `boxdd 0.6.0`, a safe Rust wrapper over the official Box2D v3 C API. Its `boxdd-sys` crate vendors the source snapshot; no system Box2D library is discovered or linked. The upstream repository is [erincatto/box2d](https://github.com/erincatto/box2d), revision `56edae79f2949d86142b03450d5d60f63bcf5a6f`, which identifies the source as Box2D 3.2.0. This is not the separate pure-Rust `box2d-rust` port.
+Avian 2D uses the Bevy 0.20 API family. Its own dependency graph includes a minimal-feature Bevy facade; no default Bevy engine features are enabled by this project. The dependency lockfile records the exact resolved transitive crates.
 
 QuickJS binding: `rquickjs 0.14.0` / `rquickjs-sys 0.14.0` vendors QuickJS-NG as a git submodule. The gitlink in the `rquickjs v0.14.0` tag resolves to [quickjs-ng/quickjs](https://github.com/quickjs-ng/quickjs/commit/0fdea21ff1090084e91dad812b343d92e79ba9d9). There is no Node.js runtime child process.
 
@@ -159,11 +179,12 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependency notices and 
 
 Primary sources:
 
-- [SDL3 Rust crate](https://docs.rs/sdl3/0.22.1/sdl3/)
+- [winit 0.30.13](https://docs.rs/winit/0.30.13/winit/)
+- [gilrs 0.11.2](https://docs.rs/gilrs/0.11.2/gilrs/)
 - [wgpu 30.0.1](https://docs.rs/wgpu/30.0.1/wgpu/)
-- [Flecs Rust binding](https://docs.rs/flecs_ecs/0.2.2/flecs_ecs/)
-- [boxdd 0.6.0](https://docs.rs/boxdd/0.6.0/boxdd/)
-- [Box2D 3.2.0 source revision](https://github.com/erincatto/box2d/commit/56edae79f2949d86142b03450d5d60f63bcf5a6f)
+- [bevy_ecs 0.20.1](https://docs.rs/bevy_ecs/0.20.1/bevy_ecs/)
+- [bevy_app 0.20.1](https://docs.rs/bevy_app/0.20.1/bevy_app/)
+- [avian2d 0.8.0](https://docs.rs/avian2d/0.8.0/avian2d/)
 - [maudio 0.1.15](https://docs.rs/maudio/0.1.15/maudio/)
 - [miniaudio upstream](https://github.com/mackron/miniaudio)
 - [rquickjs 0.14.0](https://docs.rs/rquickjs/0.14.0/rquickjs/)
@@ -172,6 +193,6 @@ Primary sources:
 
 ## Verification
 
-The focused GitHub Actions workflow runs TypeScript typecheck/build/tests, generated-JavaScript consistency, Rust formatting, Clippy, Rust tests and native target compilation on Windows x64 and Linux x64. Hosted CI proves the build/test contract but not interactive GPU presentation or audible output on physical devices.
+The CI Fast workflow runs TypeScript typecheck/build/tests, generated-JavaScript consistency, Rust formatting, Clippy, Rust tests and target checks on feature PRs. The Windows/Linux native build matrix remains a promotion check for PRs into `test` or `main`, as defined by the repository workflow. Hosted CI proves build/test contracts but not interactive GPU presentation, physical controller handling or audible output on hardware; those remain runtime smoke-test items.
 
-A local Windows x64 smoke run has also been exercised on an NVIDIA GeForce RTX 3060 Laptop GPU. Runtime screenshots and the interactive behavior should still be checked during development; Linux desktop presentation/audio require their own manual smoke run.
+The previous Windows GPU smoke test predates this native-platform migration and is not evidence for the current window and controller implementation. The new platform lifecycle and physical controller behavior must be exercised against the migrated build.

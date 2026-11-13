@@ -9,6 +9,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use crossbeam_queue::ArrayQueue;
 use native_brick_breaker::{
     ecs::EcsWorld,
+    input::GamepadState,
     physics::{PhysicsMaterial, PhysicsWorld, RigidBodyKind},
     scripting::ScriptEngine,
 };
@@ -96,6 +97,7 @@ fn bench_script(c: &mut Criterion) {
                             FIXED_STEP,
                             &mut keys_down,
                             &mut keys_pressed,
+                            GamepadState::default(),
                             &mut positions,
                             &mut collisions,
                         )
@@ -127,6 +129,7 @@ fn bench_script(c: &mut Criterion) {
                 FIXED_STEP,
                 &mut keys_down,
                 &mut keys_pressed,
+                GamepadState::default(),
                 &mut positions,
                 &mut collisions,
             )
@@ -136,8 +139,10 @@ fn bench_script(c: &mut Criterion) {
     });
 }
 
-fn make_physics_world(body_count: u32) -> PhysicsWorld {
+fn make_physics_world(body_count: u32) -> (EcsWorld, PhysicsWorld) {
+    let mut scene = EcsWorld::new();
     let mut world = PhysicsWorld::new([0.0, 0.0]).unwrap();
+    world.configure_world(scene.world_mut());
     let material = PhysicsMaterial {
         density: 1.0,
         friction: 0.0,
@@ -148,6 +153,7 @@ fn make_physics_world(body_count: u32) -> PhysicsWorld {
     for entity_id in 1..=body_count {
         world
             .create_circle(
+                scene.world_mut(),
                 entity_id,
                 [entity_id as f32 * 0.5, 0.0],
                 0.1,
@@ -156,20 +162,20 @@ fn make_physics_world(body_count: u32) -> PhysicsWorld {
             )
             .unwrap();
         world
-            .set_linear_velocity(entity_id, [0.1, (entity_id % 5) as f32 * 0.02 - 0.04])
+            .set_linear_velocity(scene.world_mut(), entity_id, [0.1, (entity_id % 5) as f32 * 0.02 - 0.04])
             .unwrap();
     }
-    world
+    (scene, world)
 }
 
 fn bench_physics(c: &mut Criterion) {
-    let mut group = c.benchmark_group("box2d");
+    let mut group = c.benchmark_group("avian2d");
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(2));
     group.sample_size(30);
 
     for body_count in [40_u32, 256, 1024] {
-        let mut world = make_physics_world(body_count);
+        let (mut scene, mut world) = make_physics_world(body_count);
         let mut collisions = Vec::new();
         let mut position_changes = Vec::new();
         group.throughput(Throughput::Elements(u64::from(body_count)));
@@ -179,7 +185,7 @@ fn bench_physics(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     collisions.clear();
-                    world.step_into(FIXED_STEP, &mut collisions).unwrap();
+                    world.step_into(scene.world_mut(), FIXED_STEP, &mut collisions).unwrap();
                     world.drain_position_changes_into(&mut position_changes);
                     black_box(&collisions);
                     black_box(&position_changes);
@@ -192,7 +198,7 @@ fn bench_physics(c: &mut Criterion) {
             &body_count,
             |b, _| {
                 b.iter(|| {
-                    world.positions_into(&mut positions).unwrap();
+                    world.positions_into(&mut positions);
                     black_box(&positions);
                 })
             },
@@ -218,13 +224,13 @@ fn make_ecs_world(entity_count: u32) -> EcsWorld {
 }
 
 fn bench_ecs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("flecs_render_data");
+    let mut group = c.benchmark_group("bevy_ecs_render_data");
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(2));
     group.sample_size(30);
 
     for entity_count in [40_u32, 256, 1024] {
-        let world = make_ecs_world(entity_count);
+        let mut world = make_ecs_world(entity_count);
         let mut rectangles = Vec::with_capacity(entity_count as usize);
         group.throughput(Throughput::Elements(u64::from(entity_count)));
         group.bench_with_input(
@@ -243,6 +249,7 @@ fn bench_ecs(c: &mut Criterion) {
 fn make_physics_scene(body_count: u32, moving_body_count: u32) -> (PhysicsWorld, EcsWorld) {
     let mut physics = PhysicsWorld::new([0.0, 0.0]).unwrap();
     let mut scene = EcsWorld::new();
+    physics.configure_world(scene.world_mut());
     let material = PhysicsMaterial {
         density: 1.0,
         friction: 0.0,
@@ -263,10 +270,10 @@ fn make_physics_scene(body_count: u32, moving_body_count: u32) -> (PhysicsWorld,
         scene.attach_physics(entity_id).unwrap();
 
         physics
-            .create_circle(entity_id, position, 0.1, RigidBodyKind::Dynamic, material)
+            .create_circle(scene.world_mut(), entity_id, position, 0.1, RigidBodyKind::Dynamic, material)
             .unwrap();
         if entity_id <= moving_body_count {
-            physics.set_linear_velocity(entity_id, [0.4, 0.2]).unwrap();
+            physics.set_linear_velocity(scene.world_mut(), entity_id, [0.4, 0.2]).unwrap();
         }
     }
 
@@ -274,7 +281,7 @@ fn make_physics_scene(body_count: u32, moving_body_count: u32) -> (PhysicsWorld,
 }
 
 fn bench_physics_frame_sync(c: &mut Criterion) {
-    let mut group = c.benchmark_group("box2d_frame_sync");
+    let mut group = c.benchmark_group("avian2d_frame_sync");
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(2));
     group.sample_size(30);
@@ -295,7 +302,7 @@ fn bench_physics_frame_sync(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("step_and_sync", id), |b| {
             b.iter(|| {
                 collisions.clear();
-                physics.step_into(FIXED_STEP, &mut collisions).unwrap();
+                physics.step_into(scene.world_mut(), FIXED_STEP, &mut collisions).unwrap();
                 physics.drain_position_changes_into(&mut position_changes);
                 scene
                     .synchronize_physics_adaptive(&position_changes, physics.positions_ref())

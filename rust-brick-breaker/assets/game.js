@@ -63,7 +63,10 @@ class BrickBreakerGame {
             this.updatePaddle(runtime);
             this.checkBallLost(runtime);
         }
-        if (runtime.input.wasPressed("Space")) {
+        if (
+            runtime.input.wasPressed("Space")
+            || runtime.input.gamepad.wasPressed("South")
+        ) {
             this.handleSpace();
         }
         this.updateHud();
@@ -132,9 +135,18 @@ class BrickBreakerGame {
         }
     }
     updatePaddle(runtime) {
-        const left = runtime.input.isDown("A") || runtime.input.isDown("ArrowLeft");
-        const right = runtime.input.isDown("D") || runtime.input.isDown("ArrowRight");
-        const direction = Number(right) - Number(left);
+        const gamepad = runtime.input.gamepad;
+        const left = runtime.input.isDown("A")
+            || runtime.input.isDown("ArrowLeft")
+            || gamepad.isDown("DPadLeft");
+        const right = runtime.input.isDown("D")
+            || runtime.input.isDown("ArrowRight")
+            || gamepad.isDown("DPadRight");
+        const digitalDirection = Number(right) - Number(left);
+        const direction = Math.max(
+            -1,
+            Math.min(1, digitalDirection + gamepad.leftStickX()),
+        );
         const x = runtime.entities.getPositionX(this.paddleId) ?? 0;
         let velocity = direction * 8.0;
         if ((x <= -3.95 && velocity < 0) || (x >= 3.95 && velocity > 0)) {
