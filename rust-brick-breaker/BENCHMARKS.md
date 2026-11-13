@@ -6,12 +6,17 @@ This document records the CPU-side performance comparison for the native 2D runt
 
 Run from rust-brick-breaker/ on the same machine, using the same power profile and without competing CPU-heavy workloads:
 
-    cargo bench --bench runtime --locked -- --save-baseline before --noplot
-    cargo bench --bench runtime --locked -- --baseline before --noplot
+    cargo bench --bench runtime --locked -- --noplot
 
-The first command records the pre-optimization baseline; the second compares the current implementation against it. Criterion stores raw measurements and reports under target/criterion/, which is build output and is not committed. Keep the before directory when repeating the comparison. Use a new baseline name for a later optimization round rather than overwriting the original.
+The before/after table below was generated against the pre-optimization implementation during this development session. Criterion's raw samples and baseline directory live under target/criterion/ and are build output, so they are not committed. A fresh checkout cannot recreate that historical baseline from this branch alone; retain the original local target/criterion/before directory when you need the exact historical comparison.
 
-The suite uses Criterion 0.8.2, 1 second warm-up, 2 seconds measurement and 30 samples per case. Build profile is Criterion's optimized benchmark profile.
+For subsequent optimization rounds, create a new local baseline before changing the measured implementation, then compare against that named baseline after the change:
+
+    cargo bench --bench runtime --locked -- --save-baseline round-1
+    # implement the next optimization without deleting target/criterion
+    cargo bench --bench runtime --locked -- --baseline round-1 --noplot
+
+Do not overwrite the historical before baseline. Use the same host, power mode, build profile, sample settings and workload for both sides. The suite uses Criterion 0.8.2 and Criterion's optimized benchmark profile.
 
 ## Measurement environment
 
