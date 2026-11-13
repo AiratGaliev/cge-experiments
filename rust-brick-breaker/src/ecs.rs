@@ -515,7 +515,8 @@ mod tests {
                 PhysicsMaterial::default(),
             )
             .unwrap();
-        assert_eq!(world.world_mut().entities().len(), 2);
+        assert_eq!(world.entity_count(), 1);
+        assert_eq!(physics.body_count(), 1);
     }
 
     #[test]
