@@ -197,7 +197,7 @@ test("Space launches the ball through the generic physics API", () => {
     keysPressed.clear();
 });
 
-test("Box2D collision events drive brick removal and scoring in TypeScript", () => {
+test("Avian 2D collision events drive brick removal and scoring in TypeScript", () => {
     const { game, engine, entities, bodies, tones, setCollisions } = createGame();
     const [ballId] = findBall(bodies);
     const firstBrick = findBricks(bodies)[0];
