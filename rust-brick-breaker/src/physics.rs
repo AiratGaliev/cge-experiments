@@ -51,14 +51,24 @@ pub struct CollisionEvent {
 
 pub type PhysicsPositions = HashMap<u32, [f32; 2]>;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PhysicsPositionChange {
+    pub entity_id: u32,
+    pub position: [f32; 2],
+}
+
 pub struct PhysicsWorld {
     _foundation: &'static Foundation,
     world: Box2dWorld,
     bodies: HashMap<u32, BodyId>,
+    body_entities: HashMap<BodyId, u32>,
     body_shapes: HashMap<u32, ShapeId>,
     shape_entities: HashMap<ShapeId, u32>,
     contact_shape_pairs: Vec<(ShapeId, ShapeId)>,
     unique_entity_pairs: HashSet<(u32, u32)>,
+    positions: PhysicsPositions,
+
+    position_changes: Vec<PhysicsPositionChange>,
 }
 
 impl PhysicsWorld {
@@ -81,10 +91,14 @@ impl PhysicsWorld {
             _foundation: foundation,
             world,
             bodies: HashMap::new(),
+            body_entities: HashMap::new(),
             body_shapes: HashMap::new(),
             shape_entities: HashMap::new(),
             contact_shape_pairs: Vec::new(),
             unique_entity_pairs: HashSet::new(),
+            positions: PhysicsPositions::new(),
+
+            position_changes: Vec::new(),
         })
     }
 
@@ -119,7 +133,7 @@ impl PhysicsWorld {
                 return Err(error);
             }
         };
-        self.register_body(entity_id, body, shape);
+        self.register_body(entity_id, body, shape, position);
         Ok(())
     }
 
@@ -154,7 +168,7 @@ impl PhysicsWorld {
                 return Err(error);
             }
         };
-        self.register_body(entity_id, body, shape);
+        self.register_body(entity_id, body, shape, position);
         Ok(())
     }
 
@@ -185,10 +199,12 @@ impl PhysicsWorld {
         Ok(())
     }
 
-    fn register_body(&mut self, entity_id: u32, body: BodyId, shape: ShapeId) {
+    fn register_body(&mut self, entity_id: u32, body: BodyId, shape: ShapeId, position: [f32; 2]) {
         self.bodies.insert(entity_id, body);
+        self.body_entities.insert(body, entity_id);
         self.body_shapes.insert(entity_id, shape);
         self.shape_entities.insert(shape, entity_id);
+        self.positions.insert(entity_id, position);
     }
 
     pub fn set_linear_velocity(&mut self, entity_id: u32, velocity: [f32; 2]) -> Result<()> {
@@ -212,6 +228,11 @@ impl PhysicsWorld {
             .body(body)?
             .set_position_and_rotation(position, 0.0)
             .context("set Box2D body transform")?;
+        self.positions.insert(entity_id, position);
+        self.position_changes.push(PhysicsPositionChange {
+            entity_id,
+            position,
+        });
         Ok(())
     }
 
@@ -222,6 +243,10 @@ impl PhysicsWorld {
             .destroy()
             .context("destroy Box2D body")?;
         self.bodies.remove(&entity_id);
+        self.body_entities.remove(&body);
+        self.positions.remove(&entity_id);
+        self.position_changes
+            .retain(|change| change.entity_id != entity_id);
         if let Some(shape) = self.body_shapes.remove(&entity_id) {
             self.shape_entities.remove(&shape);
         }
@@ -258,19 +283,45 @@ impl PhysicsWorld {
 
         self.contact_shape_pairs.clear();
         {
+            // The completed-step view borrows only the Box2D world. Split out the cache,
+            // reverse identity map and event buffers so events update them in place.
+            let contact_shape_pairs = &mut self.contact_shape_pairs;
+            let body_entities = &self.body_entities;
+            let positions = &mut self.positions;
+            let position_changes = &mut self.position_changes;
+
             let completed = self
                 .world
                 .step(delta_seconds, SOLVER_SUB_STEPS)
                 .context("step Box2D v3 world")?;
-            let contacts = completed
-                .contact_events()
-                .context("read Box2D v3 contact events")?;
-            self.contact_shape_pairs.extend(
-                contacts
-                    .begin()
-                    .iter()
-                    .map(|event| (event.shape_a, event.shape_b)),
-            );
+
+            {
+                let contacts = completed
+                    .contact_events()
+                    .context("read Box2D v3 contact events")?;
+                contact_shape_pairs.extend(
+                    contacts
+                        .begin()
+                        .iter()
+                        .map(|event| (event.shape_a, event.shape_b)),
+                );
+            }
+
+            let body_events = completed
+                .body_events()
+                .context("read Box2D body move events")?;
+            for event in body_events.iter() {
+                let Some(&entity_id) = body_entities.get(&event.body_id) else {
+                    continue;
+                };
+                let position = event.transform.position();
+                let position = [position.x, position.y];
+                positions.insert(entity_id, position);
+                position_changes.push(PhysicsPositionChange {
+                    entity_id,
+                    position,
+                });
+            }
         }
 
         self.unique_entity_pairs.clear();
@@ -295,22 +346,36 @@ impl PhysicsWorld {
         }
         Ok(())
     }
-
-    pub fn positions(&mut self) -> Result<PhysicsPositions> {
-        let mut result = PhysicsPositions::with_capacity(self.bodies.len());
-        self.positions_into(&mut result)?;
-        Ok(result)
+    pub fn positions(&self) -> Result<PhysicsPositions> {
+        Ok(self.positions.clone())
     }
 
-    /// Refreshes a reusable position map without discarding its allocation.
-    pub fn positions_into(&mut self, result: &mut PhysicsPositions) -> Result<()> {
+    /// Copies the transform cache into a caller-owned map while retaining its allocation.
+    pub fn positions_into(&self, result: &mut PhysicsPositions) -> Result<()> {
         result.clear();
-        result.reserve(self.bodies.len());
-        for (entity_id, body) in &self.bodies {
-            let position = self.world.body(*body)?.position()?;
-            result.insert(*entity_id, [position.x, position.y]);
-        }
+        result.reserve(self.positions.len());
+        result.extend(
+            self.positions
+                .iter()
+                .map(|(entity_id, position)| (*entity_id, *position)),
+        );
         Ok(())
+    }
+
+    /// Borrows the transform cache without querying every Box2D body.
+    pub fn positions_ref(&self) -> &PhysicsPositions {
+        &self.positions
+    }
+
+    /// Mutably borrows the transform cache for synchronous zero-copy script handoff.
+    pub fn positions_mut(&mut self) -> &mut PhysicsPositions {
+        &mut self.positions
+    }
+
+    /// Transfers only transforms changed since the previous drain into a reusable output buffer.
+    pub fn drain_position_changes_into(&mut self, output: &mut Vec<PhysicsPositionChange>) {
+        output.clear();
+        output.append(&mut self.position_changes);
     }
 }
 
@@ -502,5 +567,134 @@ mod tests {
             }),
             "reusable collision buffer should receive Box2D begin-contact events"
         );
+    }
+
+    #[test]
+    fn body_move_events_refresh_cached_transforms_and_dirty_entities() {
+        let mut physics = PhysicsWorld::new([0.0, 0.0]).unwrap();
+        physics
+            .create_circle(10, [0.0, 0.0], 0.2, RigidBodyKind::Dynamic, material(1.0))
+            .unwrap();
+        physics
+            .create_circle(20, [10.0, 0.0], 0.2, RigidBodyKind::Static, material(0.0))
+            .unwrap();
+        physics
+            .create_circle(
+                30,
+                [20.0, 0.0],
+                0.2,
+                RigidBodyKind::Kinematic,
+                material(0.0),
+            )
+            .unwrap();
+        physics.set_linear_velocity(10, [3.0, 0.0]).unwrap();
+        physics.set_linear_velocity(30, [0.0, 2.0]).unwrap();
+
+        let mut collisions = Vec::new();
+        for _ in 0..5 {
+            physics.step_into(1.0 / 60.0, &mut collisions).unwrap();
+        }
+
+        let moving_position = physics.positions_ref()[&10];
+        let kinematic_position = physics.positions_ref()[&30];
+        assert!(moving_position[0] > 0.0);
+        assert!(kinematic_position[1] > 0.0);
+        assert_eq!(physics.positions_ref().get(&20), Some(&[10.0, 0.0]));
+
+        let mut changes = Vec::new();
+        physics.drain_position_changes_into(&mut changes);
+        assert!(
+            changes.iter().any(|change| change.entity_id == 10),
+            "dynamic bodies that move must emit transform changes"
+        );
+        assert!(
+            changes.iter().any(|change| change.entity_id == 30),
+            "kinematic bodies that move must emit transform changes"
+        );
+        assert!(
+            !changes.iter().any(|change| change.entity_id == 20),
+            "static bodies must keep their cached transform without move events"
+        );
+        assert_eq!(
+            changes
+                .iter()
+                .rev()
+                .find(|change| change.entity_id == 10)
+                .map(|change| change.position),
+            Some(moving_position)
+        );
+    }
+
+    #[test]
+    fn body_move_events_preserve_final_transform_when_body_goes_to_sleep() {
+        let mut physics = PhysicsWorld::new([0.0, 0.0]).unwrap();
+        physics
+            .create_circle(8, [0.0, 0.0], 0.2, RigidBodyKind::Dynamic, material(1.0))
+            .unwrap();
+        physics.set_linear_velocity(8, [2.0, 0.5]).unwrap();
+
+        let mut collisions = Vec::new();
+        for _ in 0..15 {
+            physics.step_into(1.0 / 60.0, &mut collisions).unwrap();
+        }
+
+        physics.set_linear_velocity(8, [0.0, 0.0]).unwrap();
+        for _ in 0..180 {
+            physics.step_into(1.0 / 60.0, &mut collisions).unwrap();
+        }
+
+        let body = physics.body(8).unwrap();
+        let final_position = physics.world.body(body).unwrap().position().unwrap();
+        assert_eq!(
+            physics.positions_ref().get(&8),
+            Some(&[final_position.x, final_position.y]),
+            "the cached position must include the final move event when Box2D puts the body to sleep"
+        );
+    }
+
+    #[test]
+    fn explicit_transform_updates_cache_and_destroy_removes_pending_changes() {
+        let mut physics = PhysicsWorld::new([0.0, 0.0]).unwrap();
+        physics
+            .create_circle(5, [1.0, 2.0], 0.2, RigidBodyKind::Dynamic, material(1.0))
+            .unwrap();
+
+        physics.set_transform(5, [7.0, -3.0]).unwrap();
+        assert_eq!(physics.positions_ref().get(&5), Some(&[7.0, -3.0]));
+
+        physics.set_transform(5, [8.0, -4.0]).unwrap();
+        let mut changes = Vec::new();
+        physics.drain_position_changes_into(&mut changes);
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].position, [7.0, -3.0]);
+        assert_eq!(changes[1].position, [8.0, -4.0]);
+
+        physics.set_transform(5, [9.0, -5.0]).unwrap();
+        physics.destroy_body(5).unwrap();
+        assert!(!physics.positions_ref().contains_key(&5));
+        physics.drain_position_changes_into(&mut changes);
+        assert!(
+            changes.is_empty(),
+            "destroying a body must discard queued transform changes for that entity"
+        );
+    }
+
+    #[test]
+    fn positions_into_clones_the_current_move_event_cache() {
+        let mut physics = PhysicsWorld::new([0.0, 0.0]).unwrap();
+        physics
+            .create_circle(6, [2.0, 4.0], 0.2, RigidBodyKind::Dynamic, material(1.0))
+            .unwrap();
+        physics.set_linear_velocity(6, [1.0, 0.0]).unwrap();
+
+        let mut collisions = Vec::new();
+        physics.step_into(1.0 / 60.0, &mut collisions).unwrap();
+
+        let mut snapshot = PhysicsPositions::with_capacity(16);
+        let original_capacity = snapshot.capacity();
+        physics.positions_into(&mut snapshot).unwrap();
+
+        assert_eq!(snapshot, *physics.positions_ref());
+        assert!(snapshot.capacity() >= original_capacity);
     }
 }
