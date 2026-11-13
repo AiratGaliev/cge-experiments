@@ -1,0 +1,101 @@
+name: Native Integration
+
+on:
+  pull_request:
+    branches: [test, main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-integration-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-build:
+    name: native-build (${{ matrix.os }})
+    if: ${{ github.event_name != 'pull_request' || (github.base_ref == 'test' && github.head_ref == 'dev') || (github.base_ref == 'main' && (github.head_ref == 'test' || startsWith(github.head_ref, 'hotfix/'))) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: rust-brick-breaker
+
+    steps:
+      - name: Checkout event commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: rust-brick-breaker/package-lock.json
+
+      - name: Install Linux native build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential clang cmake ninja-build pkg-config libclang-dev libvulkan-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev libudev-dev \
+            libdbus-1-dev libwayland-dev libxkbcommon-dev \
+            libx11-dev libxext-dev libxfixes-dev libxi-dev libxcursor-dev \
+            libxrandr-dev libxss-dev libxrender-dev libxtst-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libdrm-dev libgbm-dev
+
+      - name: Install locked TypeScript dependency
+        run: npm ci
+
+      - name: Verify TypeScript game pipeline
+        run: |
+          npm run typecheck
+          npm run build
+          npm test
+          git diff --exit-code -- assets/game.js
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-brick-breaker -> target
+
+      - name: Run Rust unit and integration tests
+        run: cargo test --all-targets --locked
+
+      - name: Link native application executable
+        run: cargo build --locked
+
+  native-integration:
+    name: native-integration
+    if: ${{ always() && (github.event_name != 'pull_request' || (github.base_ref == 'test' && github.head_ref == 'dev') || (github.base_ref == 'main' && (github.head_ref == 'test' || startsWith(github.head_ref, 'hotfix/'))) }}
+    needs: [native-build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require successful Linux and Windows builds
+        env:
+          NATIVE_BUILD_RESULT: ${{ needs.native-build.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$NATIVE_BUILD_RESULT" != "success" ]]; then
+            echo "::error::Native platform matrix result: $NATIVE_BUILD_RESULT"
+            exit 1
+          fi
+          echo "Linux and Windows native builds passed."
