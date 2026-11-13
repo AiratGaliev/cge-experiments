@@ -45,7 +45,7 @@ The runtime owns the platform loop and native resources. winit handles window li
 
 ### Bevy dependency boundary
 
-The project directly uses the standalone `bevy_ecs`, `bevy_app`, `bevy_math`, `bevy_time` and `bevy_tasks` crates. Avian 2D 0.8 currently depends on the Bevy facade crate with default features disabled and only its minimal standard-library/logging features enabled. That facade is therefore present transitively in Cargo's dependency graph. The runtime also initializes only Bevy's global compute task pool, which Avian requires for parallel collider-tree queries; it does not install Bevy's `TaskPoolPlugin` or any renderer, windowing, input, asset, audio or full game-engine stack. winit, wgpu, gilrs and miniaudio remain the runtime's respective platform, rendering, controller and audio services.
+The project directly uses the standalone `bevy_ecs`, `bevy_app`, `bevy_math`, `bevy_time` and `bevy_tasks` crates. Avian 2D 0.8 also depends on the Bevy facade crate with default features disabled. Its transitive dependency graph can therefore contain internal support crates (including some input, window and asset types); their presence in `Cargo.lock` does not mean that the runtime installs or uses Bevy's corresponding engine plugins. The runtime initializes only Bevy's global compute task pool, which Avian requires for parallel collider-tree queries. It does not install `TaskPoolPlugin`, Bevy rendering, Bevy window integration, Bevy input, asset-pipeline or audio plugins. The runtime's actual platform, GPU rendering, controller and audio services are winit, wgpu, gilrs and miniaudio. The CI Fast dependency check guards against linking Bevy's full rendering/presentation/audio crates.
 
 ### TypeScript game lifecycle
 

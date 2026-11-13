@@ -126,6 +126,15 @@ jobs:
             exit 1
           fi
 
+      - name: Verify full Bevy Engine subsystems are not linked
+        shell: bash
+        run: |
+          set -euo pipefail
+          if cargo tree --locked --all-targets --prefix none | grep -E '^(bevy_render|bevy_winit|bevy_audio|bevy_sprite|bevy_core_pipeline|bevy_pbr|bevy_gltf|bevy_ui) v'; then
+            echo "::error::A full Bevy Engine rendering, window integration, audio or presentation subsystem is still present."
+            exit 1
+          fi
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 

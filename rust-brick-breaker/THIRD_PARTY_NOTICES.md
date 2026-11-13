@@ -20,6 +20,6 @@ The following dependencies are pinned by `Cargo.toml`, `package-lock.json` and t
 | TypeScript | `5.9.3` | Apache-2.0 | https://github.com/microsoft/TypeScript |
 | Criterion | `0.8.2` | Apache-2.0 OR MIT | https://github.com/bheisler/criterion.rs |
 
-Avian 2D 0.8 uses Bevy's 0.20 API family and includes a minimal-feature Bevy facade dependency. The project directly uses standalone ECS/app/math/time/task-pool crates and initializes only Avian's required compute pool; it does not enable Bevy's renderer, windowing, input, asset, audio or full game-engine features.
+Avian 2D 0.8 uses Bevy's 0.20 API family and includes a Bevy facade dependency with default features disabled. Its dependency graph may include internal support crates; the project does not register Bevy rendering, window integration, input, asset-pipeline or audio plugins. The runtime uses winit, wgpu, gilrs and miniaudio for those services, and initializes only Avian's required compute pool.
 
 QuickJS-NG is embedded through the pinned `rquickjs-sys` git submodule. miniaudio is built as native C through `maudio-sys`; the Rust wrapper uses pregenerated platform bindings. No third-party source is copied into this repository.

@@ -91,7 +91,7 @@ jobs:
             throw "Native executable was not produced: $executable"
           }
 
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vswhere = Join-Path \${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           if (-not (Test-Path -LiteralPath $vswhere)) {
             throw "vswhere.exe is unavailable; cannot verify native imports."
           }
@@ -118,27 +118,7 @@ jobs:
           }
           $importsText = $imports -join [Environment]::NewLine
           Write-Host $importsText
-          if ($importsText -match '(?im)^\s*SDL3\.dll\s*
-
-  native-integration:
-    name: native-integration
-    if: ${{ always() && (github.event_name != 'pull_request' || (github.base_ref == 'test' && github.head_ref == 'dev') || (github.base_ref == 'main' && (github.head_ref == 'test' || startsWith(github.head_ref, 'hotfix/'))) }}
-    needs: [native-build]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Require successful Linux and Windows builds
-        env:
-          NATIVE_BUILD_RESULT: ${{ needs.native-build.result }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "$NATIVE_BUILD_RESULT" != "success" ]]; then
-            echo "::error::Native platform matrix result: $NATIVE_BUILD_RESULT"
-            exit 1
-          fi
-          echo "Linux and Windows native builds passed."
-) {
+          if ($importsText.IndexOf('SDL3.dll', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
             throw "The Windows executable still imports SDL3.dll."
           }
 
