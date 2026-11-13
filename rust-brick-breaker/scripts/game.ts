@@ -87,13 +87,13 @@ interface PhysicsApi {
     collisionEntityB(index: number): number | undefined;
 }
 
-type GamepadButton = "South" | "DPadLeft" | "DPadRight";
+type NativeGamepadButton = "South" | "DPadLeft" | "DPadRight";
 
 interface GamepadApi {
     connected(): boolean;
     leftStickX(): number;
-    isDown(button: GamepadButton): boolean;
-    wasPressed(button: GamepadButton): boolean;
+    isDown(button: NativeGamepadButton): boolean;
+    wasPressed(button: NativeGamepadButton): boolean;
 }
 
 interface InputApi {
