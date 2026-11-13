@@ -68,7 +68,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2

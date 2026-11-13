@@ -90,7 +90,7 @@ Run all commands from `rust-brick-breaker/`.
 - Windows 10/11 x64.
 - Visual Studio 2022 Build Tools with the Desktop development with C++ workload and Windows SDK.
 - CMake and Git available on PATH.
-- Rust stable toolchain 1.97.0 or newer, with the MSVC target.
+- Rust stable toolchain 1.97.1 or newer, with the MSVC target.
 - Node.js 22.x and npm.
 - A working GPU driver with a D3D12 or Vulkan-capable adapter.
 - A gamepad is optional; keyboard input remains available when no controller is connected or gilrs initialization fails.
@@ -101,7 +101,7 @@ Run all commands from `rust-brick-breaker/`.
 - C/C++ compiler, linker, CMake, Ninja, pkg-config and Git.
 - Development packages for Vulkan, ALSA, PulseAudio, PipeWire, udev, DBus, Wayland, XKB, X11 and the selected GPU driver. CI installs the corresponding Ubuntu packages; `libudev-dev` is required by gilrs.
 - Permission to read the relevant `/dev/input/event*` devices for gamepad access. Without a usable controller or device permission the application still starts with keyboard input.
-- Rust stable toolchain 1.97.0 or newer.
+- Rust stable toolchain 1.97.1 or newer.
 - Node.js 22.x and npm.
 - A desktop session and a working Vulkan or OpenGL-capable GPU driver for interactive presentation.
 
@@ -154,7 +154,7 @@ The renderer currently supports colored rectangles, circles and a small built-in
 
 | Technology | Pinned version | Role | License / source |
 |---|---:|---|---|
-| Rust | 1.97.0 CI toolchain | Runtime and native integration | Apache-2.0 OR MIT |
+| Rust | 1.97.1 CI toolchain | Runtime and native integration | Apache-2.0 OR MIT |
 | winit | 0.30.13 | Window and platform event lifecycle | Apache-2.0 OR MIT |
 | gilrs | 0.11.2 | Standardized gamepad input and hotplug | Apache-2.0 OR MIT |
 | wgpu | 30.0.1 | GPU surface and 2D render pipeline | MIT OR Apache-2.0 |

@@ -2,7 +2,7 @@
 name = "native-brick-breaker"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.97.1"
 publish = false
 description = "Scripting-first native 2D runtime using winit, wgpu, Bevy ECS, Avian 2D, gilrs, miniaudio and QuickJS-NG"
 
