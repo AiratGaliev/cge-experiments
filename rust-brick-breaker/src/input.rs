@@ -296,18 +296,12 @@ mod tests {
 
     #[test]
     fn identical_model_controllers_use_lowest_gilrs_id_independent_of_iterator_order() {
-        let first_order = select_active_gamepad([
-            sample(1, 9, true),
-            sample(1, 3, false),
-            sample(1, 6, false),
-        ])
-        .unwrap();
-        let reverse_order = select_active_gamepad([
-            sample(1, 6, false),
-            sample(1, 3, false),
-            sample(1, 9, true),
-        ])
-        .unwrap();
+        let first_order =
+            select_active_gamepad([sample(1, 9, true), sample(1, 3, false), sample(1, 6, false)])
+                .unwrap();
+        let reverse_order =
+            select_active_gamepad([sample(1, 6, false), sample(1, 3, false), sample(1, 9, true)])
+                .unwrap();
 
         assert_eq!(first_order.device_id, 3);
         assert_eq!(reverse_order, first_order);
