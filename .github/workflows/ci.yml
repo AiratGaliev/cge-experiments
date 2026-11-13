@@ -1,0 +1,130 @@
+name: CI Fast
+
+on:
+  pull_request:
+    branches: [dev, test, main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-fast-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast-checks:
+    name: fast-checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: rust-brick-breaker
+
+    steps:
+      - name: Checkout event commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: rust-brick-breaker/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+          components: rustfmt, clippy
+
+      - name: Install Linux native build prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential clang cmake ninja-build pkg-config libclang-dev libvulkan-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev libudev-dev \
+            libdbus-1-dev libwayland-dev libxkbcommon-dev \
+            libx11-dev libxext-dev libxfixes-dev libxi-dev libxcursor-dev \
+            libxrandr-dev libxss-dev libxrender-dev libxtst-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libdrm-dev libgbm-dev
+
+      - name: Install locked TypeScript dependency
+        run: npm ci
+
+      - name: Typecheck TypeScript game
+        run: npm run typecheck
+
+      - name: Build TypeScript game
+        run: npm run build
+
+      - name: Test TypeScript game rules
+        run: npm test
+
+      - name: Verify generated JavaScript is up to date
+        run: git diff --exit-code -- assets/game.js
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-brick-breaker -> target
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Run Rust unit and integration tests
+        run: cargo test --all-targets --locked
+
+      - name: Check all Rust targets
+        run: cargo check --all-targets --locked
+
+      - name: Validate pull request routing
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_BRANCH: ${{ github.base_ref }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$BASE_BRANCH" in
+            dev)
+              case "$HEAD_BRANCH" in
+                feat/*|feature/*|fix/*|refactor/*|test/*|docs/*|chore/*|hotfix/*)
+                  echo "Допустимый маршрут: $HEAD_BRANCH -> dev"
+                  ;;
+                *)
+                  echo "::error::Рабочие PR должны использовать feat/*, feature/*, fix/*, refactor/*, test/*, docs/*, chore/* или hotfix/* и направляться в dev."
+                  exit 1
+                  ;;
+              esac
+              ;;
+            test)
+              if [[ "$HEAD_BRANCH" != "dev" ]]; then
+                echo "::error::В test допускается только PR из dev."
+                exit 1
+              fi
+              echo "Допустимый маршрут: dev -> test"
+              ;;
+            main)
+              case "$HEAD_BRANCH" in
+                test|hotfix/*)
+                  echo "Допустимый маршрут: $HEAD_BRANCH -> main"
+                  ;;
+                *)
+                  echo "::error::В main допускается только PR из test или аварийной ветки hotfix/*."
+                  exit 1
+                  ;;
+              esac
+              ;;
+            *)
+              echo "::error::Неизвестная целевая ветка: $BASE_BRANCH"
+              exit 1
+              ;;
+          esac
