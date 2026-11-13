@@ -280,11 +280,11 @@ impl ApplicationHandler for RuntimeApp {
                 }
             }
             WindowEvent::RedrawRequested => {
-                if let Some(runtime) = self.runtime.as_mut() {
-                    if let Err(error) = runtime.frame() {
-                        self.error = Some(error);
-                        event_loop.exit();
-                    }
+                if let Some(runtime) = self.runtime.as_mut()
+                    && let Err(error) = runtime.frame()
+                {
+                    self.error = Some(error);
+                    event_loop.exit();
                 }
                 self.next_redraw = Some(Instant::now() + FRAME_INTERVAL);
             }
@@ -304,13 +304,13 @@ impl ApplicationHandler for RuntimeApp {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(runtime) = self.runtime.as_ref() {
-            if let Err(error) = runtime.shutdown() {
-                if self.error.is_none() {
-                    self.error = Some(error);
-                } else {
-                    eprintln!("Game shutdown failed: {error:#}");
-                }
+        if let Some(runtime) = self.runtime.as_ref()
+            && let Err(error) = runtime.shutdown()
+        {
+            if self.error.is_none() {
+                self.error = Some(error);
+            } else {
+                eprintln!("Game shutdown failed: {error:#}");
             }
         }
     }
