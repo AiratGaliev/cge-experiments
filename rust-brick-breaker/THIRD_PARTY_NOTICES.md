@@ -9,6 +9,7 @@ The following dependencies are pinned by `Cargo.toml`, `package-lock.json` and t
 | wgpu | `30.0.1` | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |
 | bevy_ecs | `0.20.1` | MIT OR Apache-2.0 | https://github.com/bevyengine/bevy |
 | bevy_app | `0.20.1` | MIT OR Apache-2.0 | https://github.com/bevyengine/bevy |
+| bevy_tasks | `0.20.1` | MIT OR Apache-2.0 | https://github.com/bevyengine/bevy |
 | bevy_math / bevy_time | `0.20.1` | MIT OR Apache-2.0 | https://github.com/bevyengine/bevy |
 | avian2d | `0.8.0` | MIT OR Apache-2.0 | https://github.com/avianphysics/avian |
 | Bevy facade crate (transitive through Avian 2D) | `0.20.1`, default features disabled | MIT OR Apache-2.0 | https://github.com/bevyengine/bevy |
@@ -19,6 +20,6 @@ The following dependencies are pinned by `Cargo.toml`, `package-lock.json` and t
 | TypeScript | `5.9.3` | Apache-2.0 | https://github.com/microsoft/TypeScript |
 | Criterion | `0.8.2` | Apache-2.0 OR MIT | https://github.com/bheisler/criterion.rs |
 
-Avian 2D 0.8 uses Bevy's 0.20 API family and includes a minimal-feature Bevy facade dependency. The project directly uses the standalone ECS/app/math/time crates and does not enable Bevy's renderer, windowing, input, asset, audio or full game-engine features.
+Avian 2D 0.8 uses Bevy's 0.20 API family and includes a minimal-feature Bevy facade dependency. The project directly uses standalone ECS/app/math/time/task-pool crates and initializes only Avian's required compute pool; it does not enable Bevy's renderer, windowing, input, asset, audio or full game-engine features.
 
 QuickJS-NG is embedded through the pinned `rquickjs-sys` git submodule. miniaudio is built as native C through `maudio-sys`; the Rust wrapper uses pregenerated platform bindings. No third-party source is copied into this repository.

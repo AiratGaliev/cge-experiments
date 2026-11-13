@@ -12,6 +12,7 @@ This experiment is independent of the production Codogma Engine repository. It i
 - **gilrs 0.11** — controller discovery and hotplug, standardized button/axis state, deterministic active-controller selection and keyboard fallback.
 - **wgpu 30** — native GPU surface and a small 2D pipeline for colored rectangles, circles and bitmap text. The virtual world keeps a 4:3 aspect ratio; wider and taller windows are letterboxed instead of stretching game geometry.
 - **bevy_ecs 0.20** — standalone ECS entities, components, resources, queries and explicit runtime systems/schedules.
+- **bevy_tasks 0.20** — the minimal multithreaded compute pool used by Avian's parallel collider-tree queries; only the runtime's `ComputeTaskPool` is initialized.
 - **Avian 2D 0.8** — 2D rigid bodies, colliders, material properties, continuous collision detection and collision messages, integrated into the same ECS world.
 - **miniaudio** through `maudio` — native playback device and a bounded lock-free PCM queue.
 - **QuickJS-NG** through `rquickjs` — embedded JavaScript execution inside the Rust process.
@@ -44,7 +45,7 @@ The runtime owns the platform loop and native resources. winit handles window li
 
 ### Bevy dependency boundary
 
-The project directly uses the standalone `bevy_ecs`, `bevy_app`, `bevy_math` and `bevy_time` crates. Avian 2D 0.8 currently depends on the Bevy facade crate with default features disabled and only its minimal standard-library/logging features enabled. That facade is therefore present transitively in Cargo's dependency graph, but this project does not enable or use Bevy's renderer, windowing, input, asset, audio or full game-engine stack. winit, wgpu, gilrs and miniaudio remain the runtime's respective platform, rendering, controller and audio services.
+The project directly uses the standalone `bevy_ecs`, `bevy_app`, `bevy_math`, `bevy_time` and `bevy_tasks` crates. Avian 2D 0.8 currently depends on the Bevy facade crate with default features disabled and only its minimal standard-library/logging features enabled. That facade is therefore present transitively in Cargo's dependency graph. The runtime also initializes only Bevy's global compute task pool, which Avian requires for parallel collider-tree queries; it does not install Bevy's `TaskPoolPlugin` or any renderer, windowing, input, asset, audio or full game-engine stack. winit, wgpu, gilrs and miniaudio remain the runtime's respective platform, rendering, controller and audio services.
 
 ### TypeScript game lifecycle
 
@@ -184,6 +185,7 @@ Primary sources:
 - [wgpu 30.0.1](https://docs.rs/wgpu/30.0.1/wgpu/)
 - [bevy_ecs 0.20.1](https://docs.rs/bevy_ecs/0.20.1/bevy_ecs/)
 - [bevy_app 0.20.1](https://docs.rs/bevy_app/0.20.1/bevy_app/)
+- [bevy_tasks 0.20.1](https://docs.rs/bevy_tasks/0.20.1/bevy_tasks/)
 - [avian2d 0.8.0](https://docs.rs/avian2d/0.8.0/avian2d/)
 - [maudio 0.1.15](https://docs.rs/maudio/0.1.15/maudio/)
 - [miniaudio upstream](https://github.com/mackron/miniaudio)
