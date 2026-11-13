@@ -91,7 +91,7 @@ jobs:
             throw "Native executable was not produced: $executable"
           }
 
-          $vswhere = Join-Path \${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vswhere = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Microsoft Visual Studio\Installer\vswhere.exe'
           if (-not (Test-Path -LiteralPath $vswhere)) {
             throw "vswhere.exe is unavailable; cannot verify native imports."
           }
@@ -118,7 +118,7 @@ jobs:
           }
           $importsText = $imports -join [Environment]::NewLine
           Write-Host $importsText
-          if ($importsText.IndexOf('SDL3.dll', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+          if ($importsText.IndexOf('SDL3.dll', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             throw "The Windows executable still imports SDL3.dll."
           }
 
