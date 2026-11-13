@@ -219,8 +219,8 @@ impl GamepadManager {
             }
         }
 
-        // A stable hardware UUID, rather than the enumeration order or the last event,
-        // makes controller selection deterministic when several devices are connected.
+        // The model UUID is not unique per physical device. Sort by UUID and then by
+        // GamepadId, which is stable within this Gilrs context, instead of iterator order.
         let selected = gilrs
             .gamepads()
             .filter(|(_, gamepad)| gamepad.is_connected())
