@@ -130,7 +130,7 @@ jobs:
 
   native-integration:
     name: native-integration
-    if: ${{ always() && (github.event_name != 'pull_request' || (github.base_ref == 'test' && github.head_ref == 'dev') || (github.base_ref == 'main' && (github.head_ref == 'test' || startsWith(github.head_ref, 'hotfix/'))) }}
+    if: ${{ always() && (github.event_name != 'pull_request' || (github.base_ref == 'test' && github.head_ref == 'dev') || (github.base_ref == 'main' && (github.head_ref == 'test' || startsWith(github.head_ref, 'hotfix/')))) }}
     needs: [native-build]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
