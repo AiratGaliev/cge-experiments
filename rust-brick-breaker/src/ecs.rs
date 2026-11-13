@@ -127,6 +127,12 @@ impl EcsWorld {
             (apply_script_transforms, apply_script_text).chain(),
         );
 
+        // The runtime advances Avian's schedule directly instead of calling App::update().
+        // Complete the Bevy plugin lifecycle now so every plugin's finish hooks can
+        // register required resources (for example Avian's ColliderTreeDiagnostics).
+        app.finish();
+        app.cleanup();
+
         Self {
             app,
             native_entities: HashMap::new(),
@@ -498,6 +504,12 @@ mod tests {
     #[test]
     fn physics_and_scene_share_one_ecs_world() {
         let mut world = EcsWorld::new();
+        assert!(
+            world
+                .app
+                .world()
+                .contains_resource::<avian2d::collider_tree::ColliderTreeDiagnostics>()
+        );
         world
             .create_rectangle(1, 0.0, 0.0, 1.0, 1.0, [1.0; 4])
             .unwrap();
