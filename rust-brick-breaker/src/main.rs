@@ -475,6 +475,38 @@ mod tests {
     }
 
     #[test]
+    fn destroying_a_runtime_entity_also_removes_its_avian_body() {
+        use native_brick_breaker::physics::{PhysicsMaterial, RigidBodyKind};
+
+        let mut scene = EcsWorld::new();
+        let mut physics = PhysicsWorld::new([0.0, 0.0]).unwrap();
+        physics.configure_world(scene.world_mut());
+        let mut commands = vec![
+            RuntimeCommand::CreateCircle {
+                entity_id: 42,
+                x: 0.0,
+                y: 0.0,
+                radius: 0.2,
+                color: [1.0, 1.0, 1.0, 1.0],
+            },
+            RuntimeCommand::CreateCircleBody {
+                entity_id: 42,
+                position: [0.0, 0.0],
+                radius: 0.2,
+                body_type: RigidBodyKind::Dynamic,
+                material: PhysicsMaterial::default(),
+            },
+            RuntimeCommand::DestroyEntity { entity_id: 42 },
+        ];
+
+        apply_commands(&mut commands, &mut scene, &mut physics).unwrap();
+
+        assert_eq!(scene.entity_count(), 0);
+        assert!(!physics.has_body(42));
+        assert_eq!(scene.world_mut().entities().len(), 0);
+    }
+
+    #[test]
     fn key_mapping_is_platform_neutral() {
         assert_eq!(key_name(KeyCode::ArrowLeft), Some("ArrowLeft"));
         assert_eq!(key_name(KeyCode::Space), Some("Space"));

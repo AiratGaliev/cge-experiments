@@ -395,6 +395,49 @@ mod tests {
     }
 
     #[test]
+    fn avian_position_changes_are_synchronized_to_visual_entities() {
+        let mut scene = EcsWorld::new();
+        scene
+            .create_circle(7, 0.0, 0.0, 0.1, [1.0, 1.0, 1.0, 1.0])
+            .unwrap();
+        scene.attach_physics(7).unwrap();
+
+        let mut physics = PhysicsWorld::new([0.0, 0.0]).unwrap();
+        physics.configure_world(scene.world_mut());
+        physics
+            .create_circle(
+                scene.world_mut(),
+                7,
+                [0.0, 0.0],
+                0.1,
+                RigidBodyKind::Dynamic,
+                PhysicsMaterial {
+                    gravity_scale: 0.0,
+                    ..PhysicsMaterial::default()
+                },
+            )
+            .unwrap();
+        physics
+            .set_linear_velocity(scene.world_mut(), 7, [2.0, 0.0])
+            .unwrap();
+
+        let mut collisions = Vec::new();
+        physics
+            .step_into(scene.world_mut(), 1.0 / 60.0, &mut collisions)
+            .unwrap();
+        let mut changes = Vec::new();
+        physics.drain_position_changes_into(&mut changes);
+        scene
+            .synchronize_physics_adaptive(&changes, physics.positions_ref())
+            .unwrap();
+
+        let rendered = scene.draw_circles();
+        assert_eq!(rendered.len(), 1);
+        assert!(rendered[0].x > 0.0);
+        assert!(rendered[0].y.abs() < 0.0001);
+    }
+
+    #[test]
     fn destroying_entity_releases_its_bevy_ecs_record() {
         let mut world = EcsWorld::new();
         world.create_rectangle(10, 0.0, 0.0, 1.0, 1.0, [1.0; 4]).unwrap();
