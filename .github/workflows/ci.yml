@@ -139,7 +139,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ecs_features="$(cargo tree --locked --all-targets --edges features --invert bevy_ecs)"
+          # Let Cargo calculate the exact lockfile delta for the newly enabled feature graph.
+          ecs_features="$(cargo tree --all-targets --edges features --invert bevy_ecs)"
+          echo "::group::Cargo.lock delta from feature resolution"
+          git diff -- Cargo.lock
+          echo "::endgroup::"
           if ! grep -Fq 'bevy_ecs feature "multi_threaded"' <<<"$ecs_features"; then
             echo "::error::bevy_ecs/multi_threaded must remain enabled for the multithreaded schedule executor."
             exit 1
