@@ -82,7 +82,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
           components: rustfmt, clippy
 
       - name: Install Linux native build prerequisites
@@ -90,11 +90,11 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            build-essential clang cmake ninja-build pkg-config libclang-dev libvulkan-dev \
+            build-essential clang cmake ninja-build pkg-config libvulkan-dev \
             libasound2-dev libpulse-dev libpipewire-0.3-dev libudev-dev \
             libdbus-1-dev libwayland-dev libxkbcommon-dev \
             libx11-dev libxext-dev libxfixes-dev libxi-dev libxcursor-dev \
-            libxrandr-dev libxss-dev libxrender-dev libxtst-dev \
+            libxrandr-dev libxss-dev libxrender-dev \
             libegl1-mesa-dev libgl1-mesa-dev libdrm-dev libgbm-dev
 
       - name: Install locked TypeScript dependency
@@ -116,6 +116,50 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust-brick-breaker -> target
+
+      - name: Verify replaced native backends are absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          if cargo tree --locked --all-targets --prefix none | grep -E '^(sdl3|sdl3-sys|flecs_ecs|boxdd|boxdd-sys|box2d|box2d-sys) v'; then
+            echo "::error::A replaced native runtime dependency is still present."
+            exit 1
+          fi
+
+      - name: Verify full Bevy Engine subsystems are not linked
+        shell: bash
+        run: |
+          set -euo pipefail
+          if cargo tree --locked --all-targets --prefix none | grep -E '^(bevy_render|bevy_winit|bevy_audio|bevy_sprite|bevy_core_pipeline|bevy_pbr|bevy_gltf|bevy_ui) v'; then
+            echo "::error::A full Bevy Engine rendering, window integration, audio or presentation subsystem is still present."
+            exit 1
+          fi
+
+      - name: Verify Bevy ECS and Avian parallel features are enabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Let Cargo calculate the exact lockfile delta for the newly enabled feature graph.
+          ecs_features="$(cargo tree --all-targets --edges features --invert bevy_ecs)"
+          echo "::group::Cargo.lock delta from feature resolution"
+          git diff -- Cargo.lock
+          echo "::endgroup::"
+          if ! grep -Fq 'bevy_ecs feature "multi_threaded"' <<<"$ecs_features"; then
+            echo "::error::bevy_ecs/multi_threaded must remain enabled for the multithreaded schedule executor."
+            exit 1
+          fi
+
+          avian_features="$(cargo tree --locked --all-targets --edges features --invert avian2d)"
+          if ! grep -Fq 'avian2d feature "parallel"' <<<"$avian_features"; then
+            echo "::error::avian2d/parallel must remain enabled for parallel physics acceleration."
+            exit 1
+          fi
+
+          parry_features="$(cargo tree --locked --all-targets --edges features --invert parry2d)"
+          if ! grep -Fq 'parry2d feature "parallel"' <<<"$parry_features"; then
+            echo "::error::parry2d/parallel must remain enabled through Avian."
+            exit 1
+          fi
 
       - name: Check formatting
         run: cargo fmt --all -- --check

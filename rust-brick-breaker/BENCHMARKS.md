@@ -1,5 +1,7 @@
 # Runtime performance benchmarks
 
+> **Historical baseline:** the recorded measurements and subsystem comparisons in this document were collected before COD-116, when the runtime used SDL3, Flecs and Box2D. They are preserved as historical measurements only and must not be interpreted as current winit/Bevy ECS/Avian performance. The current benchmark implementation has been migrated to Avian 2D and Bevy ECS; create a fresh post-migration Criterion baseline before making performance comparisons or regression claims.
+
 This document records the CPU-side performance comparison for the native 2D runtime. It identifies promising optimization areas; it does not claim a particular game FPS.
 
 ## Reproduction

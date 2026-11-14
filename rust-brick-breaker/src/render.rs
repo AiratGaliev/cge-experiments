@@ -1,9 +1,8 @@
-use std::{borrow::Cow, mem::size_of};
+use std::{borrow::Cow, mem::size_of, sync::Arc};
 
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
-use sdl3::video::Window;
-use wgpu::rwh::{HasDisplayHandle, HasWindowHandle};
+use winit::window::Window;
 
 use crate::ecs::{DrawCircle, DrawRectangle, DrawText};
 
@@ -64,35 +63,9 @@ impl Vertex {
     }
 }
 
-// SDL windows are main-thread-owned, while wgpu's window target requires Send + Sync.
-// This wrapper only forwards the raw handles; it does not move or access the SDL window.
-struct SdlWindowHandle<'window>(&'window Window);
-
-// SAFETY: The wrapper only borrows SDL's stable native handles for surface creation.
-// All SDL window/event operations remain on the main thread.
-unsafe impl Send for SdlWindowHandle<'_> {}
-// SAFETY: See the Send implementation above. No SDL API is called through shared access.
-unsafe impl Sync for SdlWindowHandle<'_> {}
-
-impl HasWindowHandle for SdlWindowHandle<'_> {
-    fn window_handle(
-        &self,
-    ) -> std::result::Result<wgpu::rwh::WindowHandle<'_>, wgpu::rwh::HandleError> {
-        self.0.window_handle()
-    }
-}
-
-impl HasDisplayHandle for SdlWindowHandle<'_> {
-    fn display_handle(
-        &self,
-    ) -> std::result::Result<wgpu::rwh::DisplayHandle<'_>, wgpu::rwh::HandleError> {
-        self.0.display_handle()
-    }
-}
-
-pub struct Renderer<'window> {
+pub struct Renderer {
     _instance: wgpu::Instance,
-    surface: wgpu::Surface<'window>,
+    surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -103,15 +76,16 @@ pub struct Renderer<'window> {
     vertex_buffer_capacity: u64,
 }
 
-impl<'window> Renderer<'window> {
-    pub async fn new(window: &'window Window) -> Result<Self> {
-        let (width, height) = window.size_in_pixels();
+impl Renderer {
+    pub async fn new(window: Arc<Window>) -> Result<Self> {
+        let size = window.inner_size();
+        let (width, height) = (size.width, size.height);
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let surface = instance
-            .create_surface(SdlWindowHandle(window))
+            .create_surface(window.clone())
             .map_err(|error| anyhow::anyhow!(error.to_string()))
-            .context("create wgpu surface from SDL3 raw window handles")?;
+            .context("create wgpu surface from the winit window raw handles")?;
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -138,7 +112,7 @@ impl<'window> Renderer<'window> {
 
         let mut config = surface
             .get_default_config(&adapter, width.max(1), height.max(1))
-            .context("wgpu adapter cannot present to the SDL3 surface")?;
+            .context("wgpu adapter cannot present to the winit window surface")?;
         config.desired_maximum_frame_latency = 2;
         surface.configure(&device, &config);
 
