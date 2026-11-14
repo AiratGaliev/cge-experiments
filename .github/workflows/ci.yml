@@ -117,6 +117,13 @@ jobs:
         with:
           workspaces: rust-brick-breaker -> target
 
+      - name: Diagnose Cargo lockfile after parallel feature activation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo generate-lockfile --offline
+          git diff -- Cargo.lock
+
       - name: Verify replaced native backends are absent
         shell: bash
         run: |
