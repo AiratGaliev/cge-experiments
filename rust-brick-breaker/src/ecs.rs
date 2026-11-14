@@ -1,22 +1,19 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
-use avian2d::prelude::{Gravity, PhysicsPlugins, SubstepCount};
+use avian2d::prelude::{ColliderTreeOptimization, Gravity, PhysicsPlugins, SubstepCount};
 use bevy_app::App;
 use bevy_ecs::{
     component::Component,
     entity::Entity,
-    prelude::{Query, Res, Resource, World},
-    schedule::{IntoScheduleConfigs, ScheduleLabel},
+    prelude::{Resource, World},
+    query::{QueryState, With},
 };
 use bevy_math::Vec2;
 use bevy_tasks::{ComputeTaskPool, TaskPoolBuilder};
 use bevy_time::Time;
 
 use crate::physics::{NativePhysicsSchedule, PhysicsPositionChange, SOLVER_SUB_STEPS};
-
-#[derive(ScheduleLabel, Clone, Debug, Eq, Hash, PartialEq)]
-pub struct NativeRuntimeSchedule;
 
 #[derive(Component, Clone, Copy, Debug)]
 struct RuntimeEntityId(u32);
@@ -56,29 +53,6 @@ struct PendingScriptChanges {
     text: HashMap<u32, String>,
 }
 
-fn apply_script_transforms(
-    pending: Res<PendingScriptChanges>,
-    mut query: Query<(&RuntimeEntityId, &mut VisualTransform)>,
-) {
-    for (entity_id, mut transform) in &mut query {
-        if let Some(position) = pending.transforms.get(&entity_id.0) {
-            transform.x = position[0];
-            transform.y = position[1];
-        }
-    }
-}
-
-fn apply_script_text(
-    pending: Res<PendingScriptChanges>,
-    mut query: Query<(&RuntimeEntityId, &mut TextLabel)>,
-) {
-    for (entity_id, mut label) in &mut query {
-        if let Some(value) = pending.text.get(&entity_id.0) {
-            label.value.clone_from(value);
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DrawRectangle {
     pub x: f32,
@@ -113,6 +87,13 @@ pub struct EcsWorld {
     app: App,
     native_entities: HashMap<u32, Entity>,
     physics_sync_candidates: HashSet<u32>,
+    rectangle_query: QueryState<(&'static VisualTransform, &'static Rectangle)>,
+    circle_query: QueryState<(&'static VisualTransform, &'static Circle)>,
+    text_query: QueryState<(&'static VisualTransform, &'static TextLabel)>,
+    physics_link_query: QueryState<
+        (&'static RuntimeEntityId, &'static mut VisualTransform),
+        With<PhysicsLink>,
+    >,
 }
 
 impl EcsWorld {
@@ -131,22 +112,42 @@ impl EcsWorld {
         app.insert_resource(Gravity(Vec2::ZERO));
         app.insert_resource(SubstepCount(SOLVER_SUB_STEPS as u32));
         app.insert_resource(PendingScriptChanges::default());
+        // No spatial queries or collision hooks run during this runtime's physics step.
+        // In-place optimization avoids cloning the collider BVH on every physics step.
+        app.insert_resource(ColliderTreeOptimization {
+            optimize_in_place: true,
+            use_compute_task: true,
+            ..Default::default()
+        });
         app.add_plugins(PhysicsPlugins::new(NativePhysicsSchedule));
-        app.add_systems(
-            NativeRuntimeSchedule,
-            (apply_script_transforms, apply_script_text).chain(),
-        );
 
-        // The runtime advances Avian's schedule directly instead of calling App::update().
-        // Complete the Bevy plugin lifecycle now so every plugin's finish hooks can
-        // register required resources (for example Avian's ColliderTreeDiagnostics).
+        // Complete the plugin lifecycle so Avian can register all required resources.
         app.finish();
         app.cleanup();
+
+        // QueryState caches matching archetypes across frames and updates the cache when
+        // structural changes introduce new archetypes.
+        let (rectangle_query, circle_query, text_query, physics_link_query) = {
+            let world = app.world_mut();
+            (
+                world.query::<(&VisualTransform, &Rectangle)>(),
+                world.query::<(&VisualTransform, &Circle)>(),
+                world.query::<(&VisualTransform, &TextLabel)>(),
+                world.query_filtered::<
+                    (&RuntimeEntityId, &mut VisualTransform),
+                    With<PhysicsLink>,
+                >(),
+            )
+        };
 
         Self {
             app,
             native_entities: HashMap::new(),
             physics_sync_candidates: HashSet::new(),
+            rectangle_query,
+            circle_query,
+            text_query,
+            physics_link_query,
         }
     }
 
@@ -321,11 +322,35 @@ impl EcsWorld {
     }
 
     pub fn apply_pending_changes(&mut self) {
+        let mut pending = {
+            let mut pending = self.app.world_mut().resource_mut::<PendingScriptChanges>();
+            std::mem::take(&mut *pending)
+        };
         let world = self.app.world_mut();
-        world.run_schedule(NativeRuntimeSchedule);
-        let mut pending = world.resource_mut::<PendingScriptChanges>();
-        pending.transforms.clear();
-        pending.text.clear();
+
+        // Script changes already carry runtime IDs; resolve them through the existing
+        // entity index instead of scanning every visual entity each frame.
+        for (entity_id, position) in pending.transforms.drain() {
+            let Some(&entity) = self.native_entities.get(&entity_id) else {
+                continue;
+            };
+            if let Some(mut transform) = world.get_mut::<VisualTransform>(entity) {
+                transform.x = position[0];
+                transform.y = position[1];
+            }
+        }
+
+        for (entity_id, value) in pending.text.drain() {
+            let Some(&entity) = self.native_entities.get(&entity_id) else {
+                continue;
+            };
+            if let Some(mut label) = world.get_mut::<TextLabel>(entity) {
+                label.value.clone_from(&value);
+            }
+        }
+
+        // Return the drained maps to the resource so their bucket allocations survive.
+        *world.resource_mut::<PendingScriptChanges>() = pending;
     }
 
     pub fn synchronize_physics_changes(&mut self, changes: &[PhysicsPositionChange]) -> Result<()> {
@@ -354,32 +379,26 @@ impl EcsWorld {
         if changes.is_empty() || positions.is_empty() {
             return Ok(());
         }
-        if changes.len().saturating_mul(2) >= positions.len() {
+        let use_dense_query = if changes.len().saturating_mul(2) >= positions.len() {
             self.physics_sync_candidates.clear();
             self.physics_sync_candidates
                 .extend(changes.iter().map(|change| change.entity_id));
-            let updates = self
-                .native_entities
-                .iter()
-                .filter_map(|(entity_id, entity)| {
-                    if !self.physics_sync_candidates.contains(entity_id) {
-                        return None;
-                    }
-                    positions
-                        .get(entity_id)
-                        .copied()
-                        .map(|position| (*entity, position, *entity_id))
-                })
-                .collect::<Vec<_>>();
-            for (entity, position, entity_id) in updates {
-                let Some(mut transform) = self.app.world_mut().get_mut::<VisualTransform>(entity)
-                else {
-                    bail!("physics-linked ECS entity {entity_id} has no VisualTransform");
-                };
-                transform.x = position[0];
-                transform.y = position[1];
-            }
+            let is_dense =
+                self.physics_sync_candidates.len().saturating_mul(2) >= positions.len();
             self.physics_sync_candidates.clear();
+            is_dense
+        } else {
+            false
+        };
+
+        if use_dense_query {
+            let world = self.app.world_mut();
+            for (entity_id, mut transform) in self.physics_link_query.iter_mut(world) {
+                if let Some(position) = positions.get(&entity_id.0) {
+                    transform.x = position[0];
+                    transform.y = position[1];
+                }
+            }
             Ok(())
         } else {
             self.synchronize_physics_changes(changes)
@@ -394,9 +413,8 @@ impl EcsWorld {
 
     pub fn draw_rectangles_into(&mut self, output: &mut Vec<DrawRectangle>) {
         output.clear();
-        let world = self.app.world_mut();
-        let mut query = world.query::<(&VisualTransform, &Rectangle)>();
-        for (transform, rectangle) in query.iter(world) {
+        let world = self.app.world();
+        for (transform, rectangle) in self.rectangle_query.iter(world) {
             output.push(DrawRectangle {
                 x: transform.x,
                 y: transform.y,
@@ -415,9 +433,8 @@ impl EcsWorld {
 
     pub fn draw_circles_into(&mut self, output: &mut Vec<DrawCircle>) {
         output.clear();
-        let world = self.app.world_mut();
-        let mut query = world.query::<(&VisualTransform, &Circle)>();
-        for (transform, circle) in query.iter(world) {
+        let world = self.app.world();
+        for (transform, circle) in self.circle_query.iter(world) {
             output.push(DrawCircle {
                 x: transform.x,
                 y: transform.y,
@@ -435,9 +452,8 @@ impl EcsWorld {
 
     pub fn draw_text_into(&mut self, output: &mut Vec<DrawText>) {
         output.clear();
-        let world = self.app.world_mut();
-        let mut query = world.query::<(&VisualTransform, &TextLabel)>();
-        for (transform, label) in query.iter(world) {
+        let world = self.app.world();
+        for (transform, label) in self.text_query.iter(world) {
             output.push(DrawText {
                 x: transform.x,
                 y: transform.y,
@@ -512,9 +528,33 @@ mod tests {
     }
 
     #[test]
+    fn applying_pending_script_changes_retains_map_capacity() {
+        let mut world = EcsWorld::new();
+        world
+            .create_rectangle(1, 0.0, 0.0, 1.0, 1.0, [1.0; 4])
+            .unwrap();
+        world.set_position(1, 2.0, 3.0).unwrap();
+        let capacity = world
+            .app
+            .world()
+            .resource::<PendingScriptChanges>()
+            .transforms
+            .capacity();
+
+        world.apply_pending_changes();
+
+        let pending = world.app.world().resource::<PendingScriptChanges>();
+        assert!(pending.transforms.is_empty());
+        assert_eq!(pending.transforms.capacity(), capacity);
+    }
+
+    #[test]
     fn physics_and_scene_share_one_ecs_world() {
         let mut world = EcsWorld::new();
         assert!(ComputeTaskPool::try_get().is_some());
+        let tree_optimization = world.app.world().resource::<ColliderTreeOptimization>();
+        assert!(tree_optimization.optimize_in_place);
+        assert!(tree_optimization.use_compute_task);
         assert!(
             world
                 .app

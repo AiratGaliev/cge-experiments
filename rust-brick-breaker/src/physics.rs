@@ -10,6 +10,7 @@ use bevy_ecs::{
     entity::Entity,
     message::{MessageCursor, Messages},
     prelude::World,
+    query::{Changed, QueryState},
     schedule::ScheduleLabel,
 };
 use bevy_math::Vec2;
@@ -87,6 +88,9 @@ pub struct PhysicsWorld {
     bodies: HashMap<u32, Entity>,
     positions: HashMap<u32, [f32; 2]>,
     position_changes: Vec<PhysicsPositionChange>,
+    position_change_indices: HashMap<u32, usize>,
+    changed_positions_query:
+        Option<QueryState<(&'static PhysicsRuntimeEntityId, &'static Position), Changed<Position>>>,
     collision_cursor: Option<MessageCursor<CollisionStart>>,
 }
 
@@ -100,6 +104,8 @@ impl PhysicsWorld {
             bodies: HashMap::new(),
             positions: HashMap::new(),
             position_changes: Vec::new(),
+            position_change_indices: HashMap::new(),
+            changed_positions_query: None,
             collision_cursor: None,
         })
     }
@@ -201,10 +207,21 @@ impl PhysicsWorld {
 
         self.bodies.insert(entity_id, entity);
         self.positions.insert(entity_id, position);
+        self.record_position_change(entity_id, position);
+    }
+
+    fn record_position_change(&mut self, entity_id: u32, position: [f32; 2]) {
+        if let Some(index) = self.position_change_indices.get(&entity_id).copied() {
+            self.position_changes[index].position = position;
+            return;
+        }
+
+        let index = self.position_changes.len();
         self.position_changes.push(PhysicsPositionChange {
             entity_id,
             position,
         });
+        self.position_change_indices.insert(entity_id, index);
     }
 
     pub fn set_linear_velocity(
@@ -239,10 +256,7 @@ impl PhysicsWorld {
             .ok_or_else(|| anyhow::anyhow!("physics body {entity_id} has no Position"))?;
         component.0 = Vec2::new(position[0], position[1]);
         self.positions.insert(entity_id, position);
-        self.position_changes.push(PhysicsPositionChange {
-            entity_id,
-            position,
-        });
+        self.record_position_change(entity_id, position);
         Ok(())
     }
 
@@ -253,8 +267,16 @@ impl PhysicsWorld {
             .ok_or_else(|| anyhow::anyhow!("unknown physics body {entity_id}"))?;
         world.despawn(entity);
         self.positions.remove(&entity_id);
-        self.position_changes
-            .retain(|change| change.entity_id != entity_id);
+        if let Some(index) = self.position_change_indices.remove(&entity_id) {
+            self.position_changes.swap_remove(index);
+            if let Some(moved_entity_id) = self
+                .position_changes
+                .get(index)
+                .map(|change| change.entity_id)
+            {
+                self.position_change_indices.insert(moved_entity_id, index);
+            }
+        }
         Ok(())
     }
 
@@ -283,6 +305,15 @@ impl PhysicsWorld {
     ) -> Result<()> {
         if !delta_seconds.is_finite() || delta_seconds <= 0.0 {
             bail!("physics delta must be positive and finite");
+        }
+
+        if self.changed_positions_query.is_none() {
+            self.changed_positions_query = Some(
+                world.query_filtered::<
+                    (&PhysicsRuntimeEntityId, &Position),
+                    Changed<Position>,
+                >(),
+            );
         }
 
         if self.collision_cursor.is_none() {
@@ -322,24 +353,34 @@ impl PhysicsWorld {
             }
         }
 
-        for (&entity_id, &entity) in &self.bodies {
-            let Some(position) = world.get::<Position>(entity) else {
-                continue;
-            };
-            let current = [position.0.x, position.0.y];
-            if current.iter().any(|value| !value.is_finite()) {
-                bail!("Avian produced a non-finite position for runtime entity {entity_id}");
-            }
-            let changed = self.positions.get(&entity_id).is_none_or(|previous| {
-                (previous[0] - current[0]).abs() > 0.000001
-                    || (previous[1] - current[1]).abs() > 0.000001
-            });
-            if changed {
-                self.positions.insert(entity_id, current);
-                self.position_changes.push(PhysicsPositionChange {
-                    entity_id,
-                    position: current,
+        {
+            let query = self
+                .changed_positions_query
+                .as_mut()
+                .expect("changed Position query is initialized before the physics schedule");
+            for (runtime_entity, position) in query.iter(world) {
+                let entity_id = runtime_entity.0;
+                let current = [position.0.x, position.0.y];
+                if current.iter().any(|value| !value.is_finite()) {
+                    bail!("Avian produced a non-finite position for runtime entity {entity_id}");
+                }
+                let changed = self.positions.get(&entity_id).is_none_or(|previous| {
+                    (previous[0] - current[0]).abs() > 0.000001
+                        || (previous[1] - current[1]).abs() > 0.000001
                 });
+                if changed {
+                    self.positions.insert(entity_id, current);
+                    if let Some(index) = self.position_change_indices.get(&entity_id).copied() {
+                        self.position_changes[index].position = current;
+                    } else {
+                        let index = self.position_changes.len();
+                        self.position_changes.push(PhysicsPositionChange {
+                            entity_id,
+                            position: current,
+                        });
+                        self.position_change_indices.insert(entity_id, index);
+                    }
+                }
             }
         }
 
@@ -363,6 +404,7 @@ impl PhysicsWorld {
     pub fn drain_position_changes_into(&mut self, output: &mut Vec<PhysicsPositionChange>) {
         output.clear();
         std::mem::swap(output, &mut self.position_changes);
+        self.position_change_indices.clear();
     }
 }
 
@@ -627,4 +669,99 @@ mod tests {
                 .any(|change| { change.entity_id == 3 && change.position == [-2.0, 1.0] })
         );
     }
+
+    #[test]
+    fn destroying_body_keeps_pending_change_indices_consistent() {
+        let (mut scene, mut physics) = setup();
+        for entity_id in [1, 2] {
+            physics
+                .create_circle(
+                    scene.world_mut(),
+                    entity_id,
+                    [0.0, 0.0],
+                    0.1,
+                    RigidBodyKind::Dynamic,
+                    PhysicsMaterial::default(),
+                )
+                .unwrap();
+        }
+
+        physics.destroy_body(scene.world_mut(), 1).unwrap();
+        physics
+            .set_transform(scene.world_mut(), 2, [3.0, 4.0])
+            .unwrap();
+
+        let mut changes = Vec::new();
+        physics.drain_position_changes_into(&mut changes);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].entity_id, 2);
+        assert_eq!(changes[0].position, [3.0, 4.0]);
+    }
+
+    #[test]
+    fn changed_position_query_skips_static_bodies() {
+        let (mut scene, mut physics) = setup();
+        physics
+            .create_box(
+                scene.world_mut(),
+                10,
+                [0.0, 0.0],
+                [1.0, 1.0],
+                RigidBodyKind::Static,
+                PhysicsMaterial {
+                    density: 0.0,
+                    gravity_scale: 0.0,
+                    ..PhysicsMaterial::default()
+                },
+            )
+            .unwrap();
+        let mut initial_changes = Vec::new();
+        physics.drain_position_changes_into(&mut initial_changes);
+
+        let mut collisions = Vec::new();
+        physics
+            .step_into(scene.world_mut(), 1.0 / 60.0, &mut collisions)
+            .unwrap();
+
+        let mut changes = Vec::new();
+        physics.drain_position_changes_into(&mut changes);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn position_changes_are_coalesced_across_multiple_fixed_steps() {
+        let (mut scene, mut physics) = setup();
+        physics
+            .create_circle(
+                scene.world_mut(),
+                1,
+                [0.0, 0.0],
+                0.1,
+                RigidBodyKind::Dynamic,
+                PhysicsMaterial {
+                    gravity_scale: 0.0,
+                    ..PhysicsMaterial::default()
+                },
+            )
+            .unwrap();
+        physics
+            .set_linear_velocity(scene.world_mut(), 1, [2.0, 0.0])
+            .unwrap();
+
+        let mut collisions = Vec::new();
+        for _ in 0..3 {
+            physics
+                .step_into(scene.world_mut(), 1.0 / 60.0, &mut collisions)
+                .unwrap();
+        }
+
+        let mut changes = Vec::new();
+        physics.drain_position_changes_into(&mut changes);
+        assert_eq!(
+            changes.iter().filter(|change| change.entity_id == 1).count(),
+            1
+        );
+        assert!(changes[0].position[0] > 0.0);
+    }
+
 }

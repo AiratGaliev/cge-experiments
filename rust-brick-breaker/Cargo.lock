@@ -2927,6 +2927,7 @@ dependencies = [
  "num-derive",
  "num-traits",
  "ordered-float",
+ "rayon",
  "simba",
  "slab",
  "smallvec",

@@ -135,6 +135,28 @@ jobs:
             exit 1
           fi
 
+      - name: Verify Bevy ECS and Avian parallel features are enabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          ecs_features="$(cargo tree --locked --all-targets --edges features --invert bevy_ecs)"
+          if ! grep -Fq 'bevy_ecs feature "multi_threaded"' <<<"$ecs_features"; then
+            echo "::error::bevy_ecs/multi_threaded must remain enabled for the multithreaded schedule executor."
+            exit 1
+          fi
+
+          avian_features="$(cargo tree --locked --all-targets --edges features --invert avian2d)"
+          if ! grep -Fq 'avian2d feature "parallel"' <<<"$avian_features"; then
+            echo "::error::avian2d/parallel must remain enabled for parallel physics acceleration."
+            exit 1
+          fi
+
+          parry_features="$(cargo tree --locked --all-targets --edges features --invert parry2d)"
+          if ! grep -Fq 'parry2d feature "parallel"' <<<"$parry_features"; then
+            echo "::error::parry2d/parallel must remain enabled through Avian."
+            exit 1
+          fi
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
