@@ -90,10 +90,8 @@ pub struct EcsWorld {
     rectangle_query: QueryState<(&'static VisualTransform, &'static Rectangle)>,
     circle_query: QueryState<(&'static VisualTransform, &'static Circle)>,
     text_query: QueryState<(&'static VisualTransform, &'static TextLabel)>,
-    physics_link_query: QueryState<
-        (&'static RuntimeEntityId, &'static mut VisualTransform),
-        With<PhysicsLink>,
-    >,
+    physics_link_query:
+        QueryState<(&'static RuntimeEntityId, &'static mut VisualTransform), With<PhysicsLink>>,
 }
 
 impl EcsWorld {
@@ -133,10 +131,9 @@ impl EcsWorld {
                 world.query::<(&VisualTransform, &Rectangle)>(),
                 world.query::<(&VisualTransform, &Circle)>(),
                 world.query::<(&VisualTransform, &TextLabel)>(),
-                world.query_filtered::<
-                    (&RuntimeEntityId, &mut VisualTransform),
-                    With<PhysicsLink>,
-                >(),
+                world
+                    .query_filtered::<(&RuntimeEntityId, &mut VisualTransform), With<PhysicsLink>>(
+                    ),
             )
         };
 
@@ -383,8 +380,7 @@ impl EcsWorld {
             self.physics_sync_candidates.clear();
             self.physics_sync_candidates
                 .extend(changes.iter().map(|change| change.entity_id));
-            let is_dense =
-                self.physics_sync_candidates.len().saturating_mul(2) >= positions.len();
+            let is_dense = self.physics_sync_candidates.len().saturating_mul(2) >= positions.len();
             self.physics_sync_candidates.clear();
             is_dense
         } else {

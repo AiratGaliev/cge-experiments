@@ -309,10 +309,7 @@ impl PhysicsWorld {
 
         if self.changed_positions_query.is_none() {
             self.changed_positions_query = Some(
-                world.query_filtered::<
-                    (&PhysicsRuntimeEntityId, &Position),
-                    Changed<Position>,
-                >(),
+                world.query_filtered::<(&PhysicsRuntimeEntityId, &Position), Changed<Position>>(),
             );
         }
 
@@ -758,10 +755,12 @@ mod tests {
         let mut changes = Vec::new();
         physics.drain_position_changes_into(&mut changes);
         assert_eq!(
-            changes.iter().filter(|change| change.entity_id == 1).count(),
+            changes
+                .iter()
+                .filter(|change| change.entity_id == 1)
+                .count(),
             1
         );
         assert!(changes[0].position[0] > 0.0);
     }
-
 }
