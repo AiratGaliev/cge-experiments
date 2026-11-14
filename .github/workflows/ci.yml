@@ -123,6 +123,9 @@ jobs:
           set -euo pipefail
           cargo generate-lockfile
           git diff -- Cargo.lock
+          printf 'CARGO_LOCK_BASE64='
+          base64 -w0 Cargo.lock
+          printf '\\n'
 
       - name: Verify replaced native backends are absent
         shell: bash
