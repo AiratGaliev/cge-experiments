@@ -112,10 +112,10 @@ impl EcsWorld {
         app.insert_resource(Gravity(Vec2::ZERO));
         app.insert_resource(SubstepCount(SOLVER_SUB_STEPS as u32));
         app.insert_resource(PendingScriptChanges::default());
-        // No spatial queries or collision hooks run during this runtime's physics step.
-        // In-place optimization avoids cloning the collider BVH on every physics step.
+        // Avian's swept CCD traverses ColliderTrees during solver steps. Keep the
+        // current BVH available while the next tree is optimized in a compute task.
         app.insert_resource(ColliderTreeOptimization {
-            optimize_in_place: true,
+            optimize_in_place: false,
             use_compute_task: true,
             ..Default::default()
         });
@@ -553,7 +553,7 @@ mod tests {
         let mut world = EcsWorld::new();
         assert!(ComputeTaskPool::try_get().is_some());
         let tree_optimization = world.app.world().resource::<ColliderTreeOptimization>();
-        assert!(tree_optimization.optimize_in_place);
+        assert!(!tree_optimization.optimize_in_place);
         assert!(tree_optimization.use_compute_task);
         assert!(
             world
