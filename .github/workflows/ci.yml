@@ -121,7 +121,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo generate-lockfile --offline
+          cargo generate-lockfile
           git diff -- Cargo.lock
 
       - name: Verify replaced native backends are absent
