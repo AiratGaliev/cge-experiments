@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{Arc, Mutex},
 };
 
@@ -73,7 +73,6 @@ pub struct EcsWorld {
     world: World,
     native_entities: HashMap<u32, u64>,
     physics_positions: Arc<Mutex<PositionMap>>,
-    physics_sync_candidates: HashSet<u32>,
     pending_transforms: Arc<Mutex<PositionMap>>,
     pending_text: Arc<Mutex<HashMap<u32, String>>>,
 }
@@ -134,7 +133,6 @@ impl EcsWorld {
             world,
             native_entities: HashMap::new(),
             physics_positions,
-            physics_sync_candidates: HashSet::new(),
             pending_transforms,
             pending_text,
         }
@@ -256,6 +254,20 @@ impl EcsWorld {
         Ok(())
     }
 
+    pub fn detach_physics(&mut self, entity_id: u32) -> Result<()> {
+        let native_id = *self
+            .native_entities
+            .get(&entity_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown runtime entity {entity_id}"))?;
+        let physics_link = self.world.component::<PhysicsLink>();
+        self.world.entity_from_id(native_id).remove(physics_link);
+        self.physics_positions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&entity_id);
+        Ok(())
+    }
+
     pub fn set_position(&mut self, entity_id: u32, x: f32, y: f32) -> Result<()> {
         if !self.native_entities.contains_key(&entity_id) {
             bail!("unknown runtime entity {entity_id}");
@@ -317,7 +329,7 @@ impl EcsWorld {
             .clear();
     }
 
-    /// Applies only Box2D transforms that changed since the previous synchronization.
+    /// Applies only physics-body transforms that changed since the previous synchronization.
     pub fn synchronize_physics_changes(&mut self, changes: &[PhysicsPositionChange]) -> Result<()> {
         for change in changes {
             let Some(&native_id) = self.native_entities.get(&change.entity_id) else {
@@ -339,11 +351,11 @@ impl EcsWorld {
         }
         Ok(())
     }
-    /// Uses incremental entity updates for sparse movement and a direct Flecs query
-    /// when the number of move events reaches half of the physics-body count.
+    /// Applies unique body transforms incrementally for sparse movement and uses a direct
+    /// Flecs query when at least half of physics bodies changed in the current sync interval.
     ///
-    /// The dense path reads the already-maintained transform cache directly. It does
-    /// not step the world or take the legacy physics snapshot mutex per entity.
+    /// The physics adapter coalesces substep changes, so each entity occurs at most once.
+    /// The dense path reads the already-maintained transform cache directly.
     pub fn synchronize_physics_adaptive(
         &mut self,
         changes: &[PhysicsPositionChange],
@@ -353,20 +365,7 @@ impl EcsWorld {
             return Ok(());
         }
 
-        let use_full_query = if changes.len().saturating_mul(2) < positions.len() {
-            false
-        } else {
-            self.physics_sync_candidates.clear();
-            for change in changes {
-                self.physics_sync_candidates.insert(change.entity_id);
-                if self.physics_sync_candidates.len().saturating_mul(2) >= positions.len() {
-                    break;
-                }
-            }
-            let dense = self.physics_sync_candidates.len().saturating_mul(2) >= positions.len();
-            self.physics_sync_candidates.clear();
-            dense
-        };
+        let use_full_query = changes.len().saturating_mul(2) >= positions.len();
 
         if use_full_query {
             self.world
@@ -529,6 +528,44 @@ mod tests {
     }
 
     #[test]
+    fn detaching_physics_removes_the_flecs_link_and_stops_transform_sync() {
+        let mut world = EcsWorld::new();
+        world
+            .create_rectangle(7, 0.0, 0.0, 1.0, 1.0, [1.0; 4])
+            .unwrap();
+        world.attach_physics(7).unwrap();
+        world.synchronize_physics(&HashMap::from([(7, [2.0, 3.0])]));
+        assert_eq!(
+            (world.draw_rectangles()[0].x, world.draw_rectangles()[0].y),
+            (2.0, 3.0)
+        );
+
+        world.detach_physics(7).unwrap();
+        assert!(
+            !world
+                .physics_positions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&7)
+        );
+
+        world.synchronize_physics(&HashMap::from([(7, [8.0, 9.0])]));
+        world
+            .synchronize_physics_adaptive(
+                &[PhysicsPositionChange {
+                    entity_id: 7,
+                    position: [8.0, 9.0],
+                }],
+                &HashMap::from([(7, [8.0, 9.0])]),
+            )
+            .unwrap();
+        assert_eq!(
+            (world.draw_rectangles()[0].x, world.draw_rectangles()[0].y),
+            (2.0, 3.0)
+        );
+    }
+
+    #[test]
     fn adaptive_physics_sync_uses_sparse_updates_and_dense_query() {
         let mut world = EcsWorld::new();
         for entity_id in 1..=4 {
@@ -552,23 +589,13 @@ mod tests {
             (4, [40.0, 41.0]),
         ]);
 
-        // Repeated substep events for one body still count as one moved entity.
+        // Changes are coalesced by the physics adapter before ECS synchronization.
         world
             .synchronize_physics_adaptive(
-                &[
-                    PhysicsPositionChange {
-                        entity_id: 1,
-                        position: [10.0, 11.0],
-                    },
-                    PhysicsPositionChange {
-                        entity_id: 1,
-                        position: [10.0, 11.0],
-                    },
-                    PhysicsPositionChange {
-                        entity_id: 1,
-                        position: [10.0, 11.0],
-                    },
-                ],
+                &[PhysicsPositionChange {
+                    entity_id: 1,
+                    position: [10.0, 11.0],
+                }],
                 &positions,
             )
             .unwrap();

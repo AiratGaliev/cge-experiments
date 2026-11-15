@@ -9,7 +9,8 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use crossbeam_queue::ArrayQueue;
 use native_brick_breaker::{
     ecs::EcsWorld,
-    physics::{PhysicsMaterial, PhysicsWorld, RigidBodyKind},
+    input::GamepadState,
+    physics::{PhysicsExecutionMode, PhysicsMaterial, PhysicsWorld, RigidBodyKind},
     scripting::ScriptEngine,
 };
 
@@ -96,6 +97,7 @@ fn bench_script(c: &mut Criterion) {
                             FIXED_STEP,
                             &mut keys_down,
                             &mut keys_pressed,
+                            GamepadState::default(),
                             &mut positions,
                             &mut collisions,
                         )
@@ -127,6 +129,7 @@ fn bench_script(c: &mut Criterion) {
                 FIXED_STEP,
                 &mut keys_down,
                 &mut keys_pressed,
+                GamepadState::default(),
                 &mut positions,
                 &mut collisions,
             )
@@ -163,7 +166,7 @@ fn make_physics_world(body_count: u32) -> PhysicsWorld {
 }
 
 fn bench_physics(c: &mut Criterion) {
-    let mut group = c.benchmark_group("box2d");
+    let mut group = c.benchmark_group("jolt");
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(2));
     group.sample_size(30);
@@ -241,7 +244,19 @@ fn bench_ecs(c: &mut Criterion) {
 }
 
 fn make_physics_scene(body_count: u32, moving_body_count: u32) -> (PhysicsWorld, EcsWorld) {
-    let mut physics = PhysicsWorld::new([0.0, 0.0]).unwrap();
+    make_physics_scene_with_execution_mode(
+        body_count,
+        moving_body_count,
+        PhysicsExecutionMode::SingleThreaded,
+    )
+}
+
+fn make_physics_scene_with_execution_mode(
+    body_count: u32,
+    moving_body_count: u32,
+    execution_mode: PhysicsExecutionMode,
+) -> (PhysicsWorld, EcsWorld) {
+    let mut physics = PhysicsWorld::new_with_execution_mode([0.0, 0.0], execution_mode).unwrap();
     let mut scene = EcsWorld::new();
     let material = PhysicsMaterial {
         density: 1.0,
@@ -274,7 +289,7 @@ fn make_physics_scene(body_count: u32, moving_body_count: u32) -> (PhysicsWorld,
 }
 
 fn bench_physics_frame_sync(c: &mut Criterion) {
-    let mut group = c.benchmark_group("box2d_frame_sync");
+    let mut group = c.benchmark_group("jolt_frame_sync");
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(2));
     group.sample_size(30);
@@ -306,11 +321,49 @@ fn bench_physics_frame_sync(c: &mut Criterion) {
         });
     }
 }
+fn bench_physics_execution_modes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("jolt_execution_mode");
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
+    group.sample_size(30);
+
+    let modes = [
+        ("single", PhysicsExecutionMode::SingleThreaded),
+        ("workers_1", PhysicsExecutionMode::WorkerThreads(1)),
+        ("workers_2", PhysicsExecutionMode::WorkerThreads(2)),
+        ("workers_4", PhysicsExecutionMode::WorkerThreads(4)),
+    ];
+
+    for (body_count, moving_body_count) in [(1024_u32, 2_u32), (1024, 1024)] {
+        for (mode_name, mode) in modes {
+            let (mut physics, mut scene) =
+                make_physics_scene_with_execution_mode(body_count, moving_body_count, mode);
+            let mut collisions = Vec::new();
+            let mut position_changes = Vec::new();
+            let id = format!("{body_count}_{moving_body_count}_{mode_name}");
+
+            group.bench_function(BenchmarkId::new("step_and_sync", id), |b| {
+                b.iter(|| {
+                    collisions.clear();
+                    physics.step_into(FIXED_STEP, &mut collisions).unwrap();
+                    physics.drain_position_changes_into(&mut position_changes);
+                    scene
+                        .synchronize_physics_adaptive(&position_changes, physics.positions_ref())
+                        .unwrap();
+                    black_box(scene.entity_count());
+                    black_box(&position_changes);
+                });
+            });
+        }
+    }
+}
+
 criterion_group!(
     runtime_benches,
     bench_script,
     bench_physics,
     bench_ecs,
-    bench_physics_frame_sync
+    bench_physics_frame_sync,
+    bench_physics_execution_modes
 );
 criterion_main!(runtime_benches);

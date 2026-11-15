@@ -8,10 +8,11 @@ This experiment is intentionally independent of the production Codogma Engine re
 
 ## What this slice provides
 
-- **SDL3** — native window, keyboard events, focus and resize lifecycle.
+- **winit 0.30** — native window, event loop, physical keyboard events, focus and resize lifecycle.
+- **gilrs 0.11** — optional gamepad input with hot-plug handling; keyboard input remains available when no controller is connected.
 - **wgpu 30** — native GPU surface and a small 2D pipeline for colored rectangles, circles and bitmap text. The virtual world keeps a 4:3 aspect ratio; wider and taller windows are letterboxed instead of stretching game geometry.
 - **Flecs** — runtime entities/components, structural updates and physics-to-transform synchronization.
-- **Box2D v3** through `boxdd` — dynamic/static/kinematic bodies, box/circle colliders, fixed-step simulation and contact events.
+- **Jolt Physics 5.6** through `oxijolt 1.5.0` — native rigid-body simulation with a planar XY adapter, box/sphere cross-section colliders, fixed-step collision substeps, contact events and linear-cast CCD.
 - **miniaudio** through `maudio` — native playback device and a bounded lock-free PCM queue.
 - **QuickJS-NG** through `rquickjs` — embedded JavaScript execution inside the Rust process.
 - **TypeScript 5.9.3** — the source language for the complete Brick Breaker sample. Node.js is only used to typecheck, compile and test it.
@@ -19,7 +20,8 @@ This experiment is intentionally independent of the production Codogma Engine re
 ## Runtime architecture
 
 ```text
-SDL3 window / keyboard / OS events
+winit window / keyboard / OS events
+gilrs gamepad polling
                 |
                 v
          Rust Runtime loop
@@ -33,7 +35,7 @@ SDL3 window / keyboard / OS events
         queued runtime commands
           /       |        \
          v        v         v
-     Flecs ECS  Box2D v3  miniaudio
+     Flecs ECS  Jolt Physics  miniaudio
          |        |         ^
          |   collision      |
          |     events       |
@@ -43,7 +45,9 @@ SDL3 window / keyboard / OS events
          +---- render data ----> wgpu pipeline
 ```
 
-The runtime owns the platform loop and native resources. JavaScript never receives raw Rust pointers, Flecs handles, Box2D handles, SDL objects or wgpu resources. Host bindings decode typed JavaScript values, while native ECS, physics and audio boundaries validate their inputs before applying them. Structural and physics commands are queued and applied outside the Box2D step.
+The runtime owns the winit event loop and native resources. JavaScript never receives raw Rust pointers, Flecs handles, Jolt BodyIds, gilrs device handles or wgpu resources. Host bindings decode typed JavaScript values, while native ECS, physics and audio boundaries validate their inputs before applying them. Structural and physics commands are queued and applied outside the Jolt step.
+
+Physics-to-ECS synchronization uses Jolt's bulk active-body pose readout plus one-shot deactivation events, rather than polling every body after every fixed step. Static and sleeping bodies remain cached; a body that falls asleep is read once to preserve its final transform. Changed transforms are coalesced by runtime entity ID before Flecs synchronization. The sparse/dense ECS path is selected from that unique changed-body count. The readout API contains full 3D position and rotation data, while this experiment intentionally projects it to XY: its current body factory, script API, transform cache and renderer are still 2D. PhysicsExecutionMode also allows selecting a synchronous Jolt step or a worker pool; the default remains single-threaded because the current measurements do not show a consistent worker-pool advantage.
 
 ### TypeScript game lifecycle
 
@@ -63,7 +67,7 @@ The embedded script receives one global `engine` object.
 |---|---|
 | `engine.entities` | Create rectangle/circle/text entities; set visual position/text; read physics-synchronized X/Y; destroy an entity. |
 | `engine.physics` | Create box/circle bodies; set velocity/position; destroy a body; query the current frame's collision entity pairs. Repeated count and entity lookups are non-consuming within the frame. |
-| `engine.input` | Query held and just-pressed keyboard keys using platform-neutral names. |
+| `engine.input` | Query held and just-pressed keyboard keys plus gamepad connection, left-stick X, D-pad and South-button state. |
 | `engine.time` | Read the current frame delta in seconds. |
 | `engine.audio` | Queue a synthesized tone by frequency, duration and volume. `playTone()` returns `true` only when the complete tone fits in the bounded sample queue. |
 
@@ -88,12 +92,12 @@ Run all commands from `rust-brick-breaker/`.
 
 - Ubuntu 24.04 or a compatible distribution.
 - C/C++ compiler, linker, CMake, Ninja, pkg-config, Git and libclang development files, including X11 XTest (`libxtst-dev`).
-- SDL3 build dependencies: X11, Wayland, XKB, EGL/OpenGL, DRM/GBM, udev, ALSA, PulseAudio and PipeWire development packages. The CI workflow installs the corresponding Ubuntu packages.
+- Desktop development libraries for winit's X11/Wayland backends, udev for gilrs, EGL/OpenGL, DRM/GBM, ALSA, PulseAudio and PipeWire. The CI workflow installs the corresponding Ubuntu packages.
 - Rust stable toolchain 1.97.0 or newer.
 - Node.js 22.x and npm.
 - A working Vulkan or OpenGL-capable GPU driver and a desktop session for interactive execution.
 
-SDL3 is built from source through the crate's `build-from-source` feature. `maudio` uses pregenerated bindings for Windows x64 and Linux x64, so it does not require a second bindgen version.
+SDL3 is not used or built. `winit` uses the X11 and Wayland backends on Linux; `gilrs` enumerates supported gamepads and gracefully degrades when no device is available. `oxijolt` uses its default SHA-256-verified native prebuilt for x86_64 Windows MSVC and Linux GNU; the crate's CMake/C++ source build is the fallback for unsupported targets, incompatible toolchains or offline builds. `maudio` uses pregenerated bindings for Windows x64 and Linux x64, so it does not require a second bindgen version.
 
 ### Install, validate, build and launch
 
@@ -122,34 +126,38 @@ cargo run --locked
 ## Sample game: Brick Breaker
 
 - A / D or Left / Right Arrow — move the paddle.
-- Space — launch the ball; restart after Victory or Game Over.
+- Space or Gamepad South — launch the ball; restart after Victory or Game Over.
+- Gamepad Left Stick X or D-pad Left/Right — move the paddle.
 - Escape — exit.
 
-The TypeScript sample creates 36 bricks, walls, a paddle, a ball and HUD labels. Box2D produces contacts; the JavaScript game interprets those events, removes brick entities, awards score, tracks lives and chooses victory/game-over state. The Rust runtime has no Brick Breaker-specific collision roles, score counter or state machine.
+The TypeScript sample creates 36 bricks, walls, a paddle, a ball and HUD labels. Jolt produces contact events; the JavaScript game interprets those events, removes brick entities, awards score, tracks lives and chooses victory/game-over state. The Rust runtime has no Brick Breaker-specific collision roles, score counter or state machine.
 
 ## Current limitations
 
-This is intentionally a small engine foundation, not Cocos Creator 4 feature parity. The bitmap font currently covers uppercase ASCII letters and digits. The virtual world uses a fixed 4:3 aspect ratio with letterboxing, not a general camera system. QuickJS currently has no per-hook execution deadline or explicit heap quota; scripts run on the main thread, so only trusted game scripts should be loaded because a runaway callback can block the runtime. It currently has no sprite/texture or asset importer, camera system, animation/tween system, audio asset decoding, UI toolkit, scene serialization/loader, prefab workflow, scripting debugger, hot reload, editor, package manager, save system, gamepad, networking, mobile/WASM target or distribution packaging.
+This is intentionally a small engine foundation, not Cocos Creator 4 feature parity. The bitmap font currently covers uppercase ASCII letters and digits. The virtual world uses a fixed 4:3 aspect ratio with letterboxing, not a general camera system. QuickJS currently has no per-hook execution deadline or explicit heap quota; scripts run on the main thread, so only trusted game scripts should be loaded because a runaway callback can block the runtime. It currently has no sprite/texture or asset importer, camera system, animation/tween system, audio asset decoding, UI toolkit, scene serialization/loader, prefab workflow, scripting debugger, hot reload, editor, package manager, save system, generalized input-actions/rebinding UI, controller profiles, networking, mobile/WASM target or distribution packaging.
 
-The renderer currently supports colored rectangles, circles and a small built-in bitmap font. Audio currently exposes synthesized tones rather than loading sound assets. The physics facade currently exposes Box2D box/circle rigid bodies. These are explicit limits of the first vertical slice, not implied future capabilities.
+The renderer currently supports colored rectangles, circles and a small built-in bitmap font. Audio currently exposes synthesized tones rather than loading sound assets. The physics facade exposes Jolt box and sphere shapes through a planar XY adapter. Jolt itself is a 3D solver: dynamic and kinematic bodies use its XY-plane degrees-of-freedom mask (translation X/Y and rotation Z), gravity has no Z component, and boxes have finite depth. Circle colliders use spheres whose XY cross-section is circular. Density remains expressed in kg/m² and is converted to an explicit Jolt mass using planar area; a dynamic body with zero density gets a 1 kg compatibility fallback. Jolt linear-cast motion quality backs the bullet flag. The default Jolt collision layers map static bodies to NON_MOVING and dynamic/kinematic bodies to MOVING: static-static pairs are filtered out while moving bodies collide with both layers. These are explicit limits of the first vertical slice, not implied future capabilities.
 
 ## Pinned stack and upstream provenance
 
 | Technology | Pinned version | Role | License / source |
 |---|---:|---|---|
 | Rust | 1.97.0 CI toolchain | Runtime and native integration | Apache-2.0 OR MIT |
-| SDL3 Rust crate | 0.22.1 | Window, events and keyboard input | MIT crate; SDL3 source: Zlib |
+| winit | 0.30.13 | Window, event loop and keyboard input | Apache-2.0 OR MIT |
+| gilrs | 0.11.2 | Gamepad enumeration and input events | Apache-2.0 OR MIT |
 | wgpu | 30.0.1 | GPU surface and 2D render pipeline | MIT OR Apache-2.0 |
 | flecs_ecs | 0.2.2 | ECS entities, components and systems | MIT |
-| boxdd | 0.6.0 | Safe Rust API over official Box2D v3 C API | MIT OR Apache-2.0 |
-| Box2D | 3.2.0 | Native rigid-body simulation vendored by boxdd-sys | MIT |
+| oxijolt | 1.5.0+jolt-5.6.0 | Safe Rust API over Jolt Physics | MIT OR Apache-2.0 |
+| oxijolt-sys | 1.5.0+jolt-5.6.0 | Native C bindings/build integration for Jolt 5.6 | MIT OR Apache-2.0 |
+| Jolt Physics | 5.6.0, `e77f175595e64cb44218cc9d9d56fc365ad0e36a` | Native rigid-body simulation | MIT |
+| joltc | `886e088675bae3a086f8318c7803f8ee962c2f2c` | C wrapper used by oxijolt-sys | MIT |
 | maudio | 0.1.15 | Safe Rust API and playback device over miniaudio | MIT |
 | miniaudio | 0.11.23 | Native audio engine embedded by maudio-sys | Unlicense OR MIT No Attribution |
 | rquickjs | 0.14.0 | Rust bindings to QuickJS-NG | MIT |
 | QuickJS-NG | commit `0fdea21ff1090084e91dad812b343d92e79ba9d9` | Embedded ES2020 JavaScript runtime | MIT |
 | TypeScript | 5.9.3 | Game source language | Apache-2.0 |
 
-Box2D binding: `boxdd 0.6.0`, a safe Rust wrapper over the official Box2D v3 C API. Its `boxdd-sys` crate vendors the source snapshot; no system Box2D library is discovered or linked. The upstream repository is [erincatto/box2d](https://github.com/erincatto/box2d), revision `56edae79f2949d86142b03450d5d60f63bcf5a6f`, which identifies the source as Box2D 3.2.0. This is not the separate pure-Rust `box2d-rust` port.
+Physics binding: `oxijolt 1.5.0+jolt-5.6.0` is the safe Rust API; `oxijolt-sys` supplies generated bindings and the native build. The native Jolt source is pinned to [JoltPhysics commit `e77f175595e64cb44218cc9d9d56fc365ad0e36a`](https://github.com/jrouwe/JoltPhysics/commit/e77f175595e64cb44218cc9d9d56fc365ad0e36a), release 5.6.0. The C wrapper is pinned to [joltc commit `886e088675bae3a086f8318c7803f8ee962c2f2c`](https://github.com/amerkoleci/joltc/commit/886e088675bae3a086f8318c7803f8ee962c2f2c). On x86_64 Windows MSVC and Linux GNU, the default `prebuilt` feature downloads the matching checksum-verified static archive; unsupported or incompatible environments fall back to a CMake 3.20+ C++ source build.
 
 QuickJS binding: `rquickjs 0.14.0` / `rquickjs-sys 0.14.0` vendors QuickJS-NG as a git submodule. The gitlink in the `rquickjs v0.14.0` tag resolves to [quickjs-ng/quickjs](https://github.com/quickjs-ng/quickjs/commit/0fdea21ff1090084e91dad812b343d92e79ba9d9). There is no Node.js runtime child process.
 
@@ -159,11 +167,14 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependency notices and 
 
 Primary sources:
 
-- [SDL3 Rust crate](https://docs.rs/sdl3/0.22.1/sdl3/)
+- [winit 0.30.13](https://docs.rs/winit/0.30.13/winit/)
+- [gilrs 0.11.2](https://docs.rs/gilrs/0.11.2/gilrs/)
 - [wgpu 30.0.1](https://docs.rs/wgpu/30.0.1/wgpu/)
 - [Flecs Rust binding](https://docs.rs/flecs_ecs/0.2.2/flecs_ecs/)
-- [boxdd 0.6.0](https://docs.rs/boxdd/0.6.0/boxdd/)
-- [Box2D 3.2.0 source revision](https://github.com/erincatto/box2d/commit/56edae79f2949d86142b03450d5d60f63bcf5a6f)
+- [oxijolt 1.5.0](https://docs.rs/oxijolt/1.5.0/oxijolt/)
+- [oxijolt-sys 1.5.0](https://docs.rs/oxijolt-sys/1.5.0/oxijolt-sys/)
+- [Jolt Physics 5.6.0 source revision](https://github.com/jrouwe/JoltPhysics/commit/e77f175595e64cb44218cc9d9d56fc365ad0e36a)
+- [joltc source revision](https://github.com/amerkoleci/joltc/commit/886e088675bae3a086f8318c7803f8ee962c2f2c)
 - [maudio 0.1.15](https://docs.rs/maudio/0.1.15/maudio/)
 - [miniaudio upstream](https://github.com/mackron/miniaudio)
 - [rquickjs 0.14.0](https://docs.rs/rquickjs/0.14.0/rquickjs/)

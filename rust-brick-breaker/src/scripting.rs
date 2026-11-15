@@ -12,6 +12,7 @@ use rquickjs::{Array, Context, Function, Object, Persistent, Runtime};
 
 use crate::{
     audio::enqueue_tone,
+    input::GamepadState,
     physics::{CollisionEvent, PhysicsMaterial, RigidBodyKind},
 };
 
@@ -84,6 +85,7 @@ struct HostFrame {
     delta_seconds: f32,
     keys_down: HashSet<String>,
     keys_pressed: HashSet<String>,
+    gamepad: GamepadState,
     positions: HashMap<u32, [f32; 2]>,
     collisions: Vec<CollisionEvent>,
 }
@@ -508,6 +510,40 @@ impl ScriptEngine {
                         })?,
                     )?;
                 }
+                let gamepad = Object::new(ctx.clone())?;
+                {
+                    let state = Arc::clone(&host);
+                    gamepad.set(
+                        "connected",
+                        Function::new(ctx.clone(), move || lock(&state).frame.gamepad.connected)?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    gamepad.set(
+                        "leftStickX",
+                        Function::new(ctx.clone(), move || lock(&state).frame.gamepad.left_stick_x)?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    gamepad.set(
+                        "isDown",
+                        Function::new(ctx.clone(), move |button: String| {
+                            lock(&state).frame.gamepad.is_down_named(&button)
+                        })?,
+                    )?;
+                }
+                {
+                    let state = Arc::clone(&host);
+                    gamepad.set(
+                        "wasPressed",
+                        Function::new(ctx.clone(), move |button: String| {
+                            lock(&state).frame.gamepad.was_pressed_named(&button)
+                        })?,
+                    )?;
+                }
+                input.set("gamepad", gamepad)?;
                 engine.set("input", input)?;
 
                 let time = Object::new(ctx.clone())?;
@@ -607,8 +643,13 @@ impl ScriptEngine {
         state.frame.delta_seconds = delta_seconds;
         state.frame.keys_down = keys_down;
         state.frame.keys_pressed = keys_pressed;
+        state.frame.gamepad = GamepadState::default();
         state.frame.positions = positions;
         state.frame.collisions = collisions;
+    }
+
+    pub fn set_gamepad_state(&self, gamepad: GamepadState) {
+        lock(&self.host).frame.gamepad = gamepad;
     }
 
     /// Temporarily hands frame buffers to the host state without cloning their contents.
@@ -619,6 +660,7 @@ impl ScriptEngine {
         delta_seconds: f32,
         keys_down: &mut HashSet<String>,
         keys_pressed: &mut HashSet<String>,
+        gamepad: GamepadState,
         positions: &mut HashMap<u32, [f32; 2]>,
         collisions: &mut Vec<CollisionEvent>,
     ) -> Result<()> {
@@ -627,6 +669,7 @@ impl ScriptEngine {
             state.frame.delta_seconds = delta_seconds;
             std::mem::swap(&mut state.frame.keys_down, keys_down);
             std::mem::swap(&mut state.frame.keys_pressed, keys_pressed);
+            state.frame.gamepad = gamepad;
             std::mem::swap(&mut state.frame.positions, positions);
             std::mem::swap(&mut state.frame.collisions, collisions);
         }
@@ -681,6 +724,50 @@ mod tests {
 
     fn audio_queue() -> Arc<ArrayQueue<f32>> {
         Arc::new(ArrayQueue::new(32_768))
+    }
+
+    #[test]
+    fn gamepad_host_api_exposes_connection_axis_and_edge_triggered_buttons() {
+        let script_source = r#"
+            globalThis.game = {
+                initialize() {},
+                update(engine) {
+                    this.connected = engine.input.gamepad.connected();
+                    this.axis = engine.input.gamepad.leftStickX();
+                    this.southDown = engine.input.gamepad.isDown("South");
+                    this.southPressed = engine.input.gamepad.wasPressed("South");
+                    this.dpadLeftDown = engine.input.gamepad.isDown("DPadLeft");
+                    this.dpadLeftPressed = engine.input.gamepad.wasPressed("DPadLeft");
+                },
+                shutdown() {}
+            };
+        "#;
+        let script = ScriptEngine::from_source(script_source, audio_queue()).unwrap();
+        script.set_gamepad_state(GamepadState {
+            connected: true,
+            left_stick_x: -0.625,
+            south_down: true,
+            south_pressed: true,
+            dpad_left_down: true,
+            dpad_left_pressed: false,
+            ..GamepadState::default()
+        });
+        script.update().unwrap();
+
+        let game = script.hooks.game.as_ref().unwrap().clone();
+        script
+            .context
+            .with(|ctx| -> rquickjs::Result<()> {
+                let game = game.restore(&ctx)?;
+                assert!(game.get::<_, bool>("connected")?);
+                assert_eq!(game.get::<_, f32>("axis")?, -0.625);
+                assert!(game.get::<_, bool>("southDown")?);
+                assert!(game.get::<_, bool>("southPressed")?);
+                assert!(game.get::<_, bool>("dpadLeftDown")?);
+                assert!(!game.get::<_, bool>("dpadLeftPressed")?);
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]
@@ -984,6 +1071,7 @@ mod tests {
                 1.0 / 60.0,
                 &mut keys_down,
                 &mut keys_pressed,
+                GamepadState::default(),
                 &mut positions,
                 &mut collisions,
             )
@@ -1033,6 +1121,7 @@ mod tests {
                     1.0 / 60.0,
                     &mut keys_down,
                     &mut keys_pressed,
+                    GamepadState::default(),
                     &mut positions,
                     &mut collisions,
                 )
