@@ -78,12 +78,90 @@ jobs:
       - name: Run Rust unit and integration tests
         run: cargo test --all-targets --locked
 
+      - name: Verify replaced native platform libraries are absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          dependencies="$(cargo tree --locked --all-targets --prefix none)"
+          if grep -E '^(sdl3(-sys)?|bevy(_[[:alnum:]_]+)?|avian2d) v' <<<"$dependencies"; then
+            echo "::error::SDL3, Bevy or Avian dependency is still present."
+            exit 1
+          fi
+          if ! grep -Eq '^winit v' <<<"$dependencies"; then
+            echo "::error::winit is missing from the dependency graph."
+            exit 1
+          fi
+          if ! grep -Eq '^gilrs v' <<<"$dependencies"; then
+            echo "::error::gilrs is missing from the dependency graph."
+            exit 1
+          fi
+          if ! grep -Eq '^flecs_ecs v' <<<"$dependencies"; then
+            echo "::error::Flecs must remain the ECS implementation."
+            exit 1
+          fi
+          if ! grep -Eq '^oxijolt v1\.5\.0\+jolt-5\.6\.0' <<<"$dependencies"; then
+            echo "::error::oxijolt 1.5.0 / Jolt 5.6.0 is missing."
+            exit 1
+          fi
+          if ! grep -Eq '^oxijolt-sys v1\.5\.0\+jolt-5\.6\.0' <<<"$dependencies"; then
+            echo "::error::oxijolt-sys 1.5.0 / Jolt 5.6.0 is missing."
+            exit 1
+          fi
+          if grep -E '^(boxdd|boxdd-sys|box2d|box2d-sys) v' <<<"$dependencies"; then
+            echo "::error::Box2D dependencies are still present."
+            exit 1
+          fi
+
       - name: Link native application executable
         run: cargo build --locked
 
+      - name: Verify Windows executable does not import SDL3
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $executable = Join-Path $env:GITHUB_WORKSPACE 'rust-brick-breaker\target\debug\native-brick-breaker.exe'
+          if (-not (Test-Path -LiteralPath $executable)) {
+            throw "Native executable was not produced: $executable"
+          }
+
+          $vswhere = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) {
+            throw "vswhere.exe is unavailable; cannot verify native imports."
+          }
+          $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ([string]::IsNullOrWhiteSpace($installation)) {
+            throw "Visual C++ Build Tools were not found; cannot verify native imports."
+          }
+          $msvcRoot = Join-Path $installation 'VC\Tools\MSVC'
+          $msvcVersion = Get-ChildItem -LiteralPath $msvcRoot -Directory |
+            Sort-Object { [version]$_.Name } -Descending |
+            Select-Object -First 1
+          if ($null -eq $msvcVersion) {
+            throw "MSVC tool directory was not found."
+          }
+          $dumpbin = Join-Path $msvcVersion.FullName 'bin\Hostx64\x64\dumpbin.exe'
+          if (-not (Test-Path -LiteralPath $dumpbin)) {
+            throw "dumpbin.exe was not found: $dumpbin"
+          }
+          $imports = & $dumpbin /nologo /dependents $executable 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            throw "dumpbin failed to inspect native imports: $($imports -join [Environment]::NewLine)"
+          }
+          $importsText = $imports -join [Environment]::NewLine
+          Write-Host $importsText
+          if ($importsText.IndexOf('SDL3.dll', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            throw "The Windows executable still imports SDL3.dll."
+          }
+          $sdlArtifacts = Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'rust-brick-breaker\target') -Filter 'SDL3.dll' -File -Recurse -ErrorAction SilentlyContinue
+          if ($sdlArtifacts) {
+            throw "SDL3 runtime artifacts were produced: $($sdlArtifacts.FullName -join ', ')"
+          }
+          Write-Host "Verified: the Windows executable does not import SDL3.dll and no SDL3.dll artifact was produced."
+
   native-integration:
     name: native-integration
-    if: ${{ always() && (github.event_name != 'pull_request' || (github.base_ref == 'test' && github.head_ref == 'dev') || (github.base_ref == 'main' && (github.head_ref == 'test' || startsWith(github.head_ref, 'hotfix/'))) }}
+    if: ${{ always() && (github.event_name != 'pull_request' || (github.base_ref == 'test' && github.head_ref == 'dev') || (github.base_ref == 'main' && (github.head_ref == 'test' || startsWith(github.head_ref, 'hotfix/')))) }}
     needs: [native-build]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
