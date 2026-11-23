@@ -117,6 +117,40 @@ jobs:
         with:
           workspaces: rust-brick-breaker -> target
 
+      - name: Verify SDL3 and Bevy physics dependencies are absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          dependencies="$(cargo tree --locked --all-targets --prefix none)"
+          if grep -E '^(sdl3(-sys)?|bevy(_[[:alnum:]_]+)?|avian2d) v' <<<"$dependencies"; then
+            echo "::error::SDL3, Bevy or Avian dependency is still present."
+            exit 1
+          fi
+          if ! grep -Eq '^winit v' <<<"$dependencies"; then
+            echo "::error::winit is missing from the dependency graph."
+            exit 1
+          fi
+          if ! grep -Eq '^gilrs v' <<<"$dependencies"; then
+            echo "::error::gilrs is missing from the dependency graph."
+            exit 1
+          fi
+          if ! grep -Eq '^flecs_ecs v' <<<"$dependencies"; then
+            echo "::error::Flecs must remain the ECS implementation."
+            exit 1
+          fi
+          if ! grep -Eq '^oxijolt v1\.5\.0\+jolt-5\.6\.0' <<<"$dependencies"; then
+            echo "::error::oxijolt 1.5.0 / Jolt 5.6.0 is missing."
+            exit 1
+          fi
+          if ! grep -Eq '^oxijolt-sys v1\.5\.0\+jolt-5\.6\.0' <<<"$dependencies"; then
+            echo "::error::oxijolt-sys 1.5.0 / Jolt 5.6.0 is missing."
+            exit 1
+          fi
+          if grep -E '^(boxdd|boxdd-sys|box2d|box2d-sys) v' <<<"$dependencies"; then
+            echo "::error::Box2D dependencies are still present."
+            exit 1
+          fi
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
